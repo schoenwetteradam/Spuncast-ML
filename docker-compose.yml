@@ -1,0 +1,14 @@
+services:
+  spuncast-ml:
+    build:
+      context: .
+    image: spuncast-ml:latest
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+      - ./reports:/app/reports
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
