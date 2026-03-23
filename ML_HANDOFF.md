@@ -32,25 +32,71 @@ This view is defined in:
 
 - `scrap_flag`
 
-## Feature groups in v1
+## Stable contract expectations in `Spuncast-ML`
 
-- heat identity and grouping
-- pour/process variables
-- missing-data flags
-- simple process deltas
-- chemistry summary and alert flags
-- heat-treat summary
-- lot/output summary
-- scrap summary and reason-code bucket
+- pin the expected schema in source control
+- fail fast if columns are added, removed, or renamed unexpectedly
+- coordinate breaking changes across both repos using PR notes and contract updates
 
-## Suggested ML repo responsibilities
+## Snapshot policy
 
-- export dataset snapshots
-- feature engineering beyond the base view
-- train/validation/test splits
-- model training and evaluation
-- reporting
-- model promotion decisions
+Preferred extraction query:
+
+```sql
+SELECT *
+FROM v_ml_heat_dataset_v1
+WHERE analysis_date IS NOT NULL
+ORDER BY analysis_date, heat_number;
+```
+
+Each saved snapshot should include:
+
+- extraction timestamp
+- source query hash
+- source contract version
+- source schema/version note
+
+## Leakage guardrails
+
+Operational models should keep a dedicated `pre_pour_in_process` feature set
+that excludes leakage-prone columns such as:
+
+- `quantity_scrapped`
+- `scrap_event_count`
+- `scrap_event_quantity`
+- `scrap_weight_lbs`
+- `scrap_estimated_cost`
+- `total_recorded_scrap_qty`
+- `reason_code`
+- `defect_type`
+- `department`
+
+A separate `post_run_diagnostic` feature set can be used for retrospective
+analysis and explainability.
+
+## Split policy
+
+Use chronological splits rather than random row splits:
+
+- train: oldest period
+- validation: middle period
+- test: newest period
+
+## Baselines and metrics
+
+Recommended baseline candidates:
+
+- logistic regression with class weighting
+- gradient boosting / tree ensemble
+- calibrated probability model for thresholding
+
+Track at minimum:
+
+- recall for `scrap_flag=1`
+- precision / PR-AUC
+- ROC-AUC
+- confusion matrix
+- false negatives
 
 ## Promotion rule
 
