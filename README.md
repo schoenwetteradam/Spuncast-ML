@@ -189,6 +189,41 @@ Run the full workflow end to end:
 spuncast-ml pipeline --feature-set pre_pour_in_process --threshold 0.5
 ```
 
+Score a dataset with the latest trained model and generate operator-facing
+recommendations (`continue_standard_run`, `increase_monitoring`,
+`hold_for_operator_review`):
+
+```powershell
+spuncast-ml score --feature-set pre_pour_in_process --threshold 0.5
+```
+
+Generate a drift report by comparing the latest export to the snapshot used to
+train the latest model:
+
+```powershell
+spuncast-ml monitor-drift --feature-set pre_pour_in_process
+```
+
+Capture operator feedback (accepted or rejected recommendation) for continuous
+learning inputs:
+
+```powershell
+spuncast-ml feedback --heat-number 12345 --recommendation increase_monitoring --accepted --score 0.67 --operator-id shift-b
+```
+
+## Live operations loop (recommended rollout)
+
+Use ML in three controlled stages before any automation:
+
+1. **Shadow mode**: run `score` and track quality without changing operations.
+2. **Advisor mode**: expose recommendations to operators and log responses with
+   `feedback`.
+3. **Guarded automation**: only allow bounded machine adjustments behind a
+   policy layer with safety limits, approvals, and audit logs.
+
+`monitor-drift` should run on a schedule (for example each shift or each day)
+to identify retraining triggers before performance degrades.
+
 ## Relationship to Spuncast-Operations
 
 - Upstream SQL contract reference: `067_ml_heat_dataset.sql`
