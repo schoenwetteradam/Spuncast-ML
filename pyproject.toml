@@ -24,3 +24,6 @@ spuncast-ml = "spuncast_ml.cli:main"
 [tool.setuptools]
 packages = ["spuncast_ml"]
 
+
+[tool.setuptools.package-data]
+spuncast_ml = ["contracts/*.json"]

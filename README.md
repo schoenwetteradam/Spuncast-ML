@@ -13,39 +13,107 @@ SELECT * FROM v_ml_heat_dataset_v1;
 ## Responsibilities
 
 - export repeatable dataset snapshots from the operations database
-- apply ML-safe feature selection and preprocessing
-- generate train / validation / test splits
-- train and evaluate a first-pass scrap prediction model
+- pin and validate the upstream view contract before training
+- keep separate operational and diagnostic feature sets
+- generate chronological train / validation / test splits
+- train and evaluate baseline scrap prediction models
 - compare model results against a rules-based baseline before promotion
 
 ## Repository layout
 
 ```text
 Spuncast-ML/
-|-- .env.example
-|-- pyproject.toml
-|-- README.md
-|-- ML_HANDOFF.md
+|-- artifacts/
+|   `-- models/
 |-- data/
 |   |-- exports/
 |   `-- processed/
-|-- artifacts/
-|   `-- models/
 |-- reports/
 |   `-- generated/
+|-- scripts/
 `-- spuncast_ml/
     |-- cli.py
+    |-- contract.py
+    |-- contracts/
+    |   `-- v_ml_heat_dataset_v1.json
     |-- dataset.py
     |-- db.py
     `-- modeling.py
 ```
+
+## Data contract and snapshot policy
+
+The stable upstream contract is `v_ml_heat_dataset_v1`, with the schema pinned in
+`spuncast_ml/contracts/v_ml_heat_dataset_v1.json`. Exports now fail fast if the
+view adds, removes, or renames columns unexpectedly.
+
+The default extraction query follows the agreed snapshot policy:
+
+```sql
+SELECT *
+FROM v_ml_heat_dataset_v1
+WHERE analysis_date IS NOT NULL
+ORDER BY analysis_date, heat_number;
+```
+
+Each export writes:
+
+- an immutable Parquet snapshot under `data/exports/`
+- a JSON sidecar containing the extraction timestamp
+- the source query hash
+- the pinned contract version
+- the schema/version note
+
+## Feature-set guardrails
+
+Two explicit feature sets are supported:
+
+- `pre_pour_in_process` for operational prediction
+- `post_run_diagnostic` for retrospective analysis and explainability
+
+The operational feature set excludes leakage-prone scrap outcome columns and
+other likely post-outcome fields such as scrap quantities, scrap reason fields,
+and downstream lot or heat-treat summaries.
+
+## Time split policy
+
+Dataset splits are chronological, not random:
+
+- train: oldest 70%
+- validation: middle 15%
+- test: newest 15%
+
+Rows are ordered by `analysis_date` and `heat_number` before splitting.
+
+## Modeling and promotion gates
+
+Baseline candidates currently trained in this repo:
+
+- logistic regression with class weighting
+- calibrated histogram gradient boosting
+- rules-based alert baseline for comparison
+
+Tracked metrics include:
+
+- recall for `scrap_flag=1`
+- precision
+- PR-AUC
+- ROC-AUC
+- confusion matrix
+- false negatives
+
+Promotion remains blocked unless the selected model:
+
+- matches or beats the rules baseline on recall
+- does not increase false negatives
+- matches or improves PR-AUC
 
 ## Quick start
 
 ### Option 1: Docker runtime
 
 This is the recommended path on this machine because Docker is available and
-Python is not currently on `PATH`.
+Python is not guaranteed to match the project runtime requirements.
 
 ```powershell
 Copy-Item .env.example .env
@@ -88,61 +156,42 @@ PGHOST=localhost
 PG_HOST=localhost
 ```
 
-Set the rest of the database credentials in `.env` so this repo can connect to
-the same Postgres / TimescaleDB instance used by `Spuncast-Operations`.
-
 ## Commands
 
-Export the canonical dataset view to a timestamped parquet snapshot:
+Export the canonical dataset view to an immutable timestamped snapshot with
+provenance metadata:
 
 ```powershell
 spuncast-ml export
 ```
 
-Train the first-pass baseline model and write outputs to `artifacts/models/`:
+Train the current baseline candidate set using the operational feature set:
 
 ```powershell
-spuncast-ml train
+spuncast-ml train --feature-set pre_pour_in_process --threshold 0.5
+```
+
+Run a retrospective diagnostic evaluation instead:
+
+```powershell
+spuncast-ml train --feature-set post_run_diagnostic --threshold 0.5
 ```
 
 Generate a fresh evaluation report:
 
 ```powershell
-spuncast-ml evaluate
+spuncast-ml evaluate --feature-set pre_pour_in_process --threshold 0.5
 ```
 
 Run the full workflow end to end:
 
 ```powershell
-spuncast-ml pipeline
+spuncast-ml pipeline --feature-set pre_pour_in_process --threshold 0.5
 ```
-
-Docker equivalent:
-
-```powershell
-docker compose run --rm spuncast-ml pipeline
-```
-
-## Baselines and guardrails
-
-- The modeling grain is one row per `heat_number`.
-- The initial target is `scrap_flag`.
-- Training intentionally excludes direct label columns and downstream scrap
-  summary fields to avoid leakage.
-- A simple rules baseline is included so model promotion can be gated on
-  measurable improvement instead of intuition.
 
 ## Relationship to Spuncast-Operations
 
-- Upstream SQL contract: `db/init/067_ml_heat_dataset.sql`
-- Handoff notes: [`ML_HANDOFF.md`](/D:/Data/Spuncast-ML/ML_HANDOFF.md)
-- Recommended promotion rule: do not deploy a model unless it clearly beats
-  the current rules-based baseline on scrap detection and false-negative control.
-
-## Runtime notes
-
-- The Docker image includes the Python runtime and project dependencies.
-- Output files are persisted to the local `data/`, `artifacts/`, and `reports/`
-  folders through bind mounts.
-- If the operations database is only reachable inside a Docker network and not
-  on host port `5432`, update `PGHOST` accordingly before running the pipeline.
+- Upstream SQL contract reference: `067_ml_heat_dataset.sql`
+- Handoff notes: `ML_HANDOFF.md`
+- Breaking schema changes should be coordinated across both repos and reflected
+  in the pinned contract file plus PR notes.
