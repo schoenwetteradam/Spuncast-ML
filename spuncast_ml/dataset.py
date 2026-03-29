@@ -68,9 +68,34 @@ POST_RUN_DIAGNOSTIC_EXCLUDED_COLUMNS = {
     "has_scrap",
 }
 
+EARLY_REMELT_DECISION_EXCLUDED_COLUMNS = {
+    TARGET_COLUMN,
+    "has_scrap",
+    "scrap_rate_pct",
+    "quantity_scrapped",
+    "scrap_event_count",
+    "scrap_event_quantity",
+    "scrap_weight_lbs",
+    "scrap_estimated_cost",
+    "total_recorded_scrap_qty",
+    "reason_code",
+    "defect_type",
+    "department",
+    "heat_treat_temp_delta",
+    "setpoint_temp_f",
+    "actual_temp_f",
+    "cycle_name",
+    "equipment_code",
+    "quantity_shipped",
+    "quantity_on_hold",
+    "lot_count",
+    "latest_lot_date",
+}
+
 FEATURE_SET_EXCLUSIONS = {
     "pre_pour_in_process": PRE_POUR_IN_PROCESS_EXCLUDED_COLUMNS,
     "post_run_diagnostic": POST_RUN_DIAGNOSTIC_EXCLUDED_COLUMNS,
+    "early_remelt_decision": EARLY_REMELT_DECISION_EXCLUDED_COLUMNS,
 }
 
 
