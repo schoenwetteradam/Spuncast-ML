@@ -228,5 +228,6 @@ to identify retraining triggers before performance degrades.
 
 - Upstream SQL contract reference: `067_ml_heat_dataset.sql`
 - Handoff notes: `ML_HANDOFF.md`
+- Dependency register and license record: `DEPENDENCIES.md`
 - Breaking schema changes should be coordinated across both repos and reflected
   in the pinned contract file plus PR notes.

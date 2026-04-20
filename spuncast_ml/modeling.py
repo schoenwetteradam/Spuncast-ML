@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import platform
+import sys
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -24,12 +27,21 @@ from sklearn.metrics import (
 )
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
+import sklearn
 
 from spuncast_ml.dataset import DEFAULT_FEATURE_SET, create_splits, load_latest_export
 from spuncast_ml.db import ensure_dir
 
 
 DEFAULT_DECISION_THRESHOLD = 0.5
+
+
+def compute_file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8192), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def model_dir() -> Path:
@@ -223,9 +235,19 @@ def train_model(feature_set: str = DEFAULT_FEATURE_SET, threshold: float = DEFAU
         "target_column": "scrap_flag",
         "rules_baseline_metrics": baseline_metrics,
         "promotion_gate": candidate_results[best_candidate_name]["promotion_gate"],
+        "model_sha256": None,
+        "training_environment": {
+            "python_version": platform.python_version(),
+            "python_implementation": platform.python_implementation(),
+            "platform": platform.platform(),
+            "scikit_learn_version": sklearn.__version__,
+            "joblib_version": joblib.__version__,
+            "runtime_executable": sys.executable,
+        },
     }
 
     joblib.dump(best_pipeline, model_path)
+    metadata["model_sha256"] = compute_file_sha256(model_path)
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     return {
