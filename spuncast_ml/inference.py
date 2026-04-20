@@ -20,7 +20,7 @@ from spuncast_ml.dataset import (
     load_latest_export,
 )
 from spuncast_ml.db import ensure_dir
-from spuncast_ml.modeling import DEFAULT_DECISION_THRESHOLD, model_dir
+from spuncast_ml.modeling import DEFAULT_DECISION_THRESHOLD, compute_file_sha256, model_dir
 
 
 def score_dir() -> Path:
@@ -44,6 +44,25 @@ def _load_latest_model_and_metadata(feature_set: str) -> tuple[Path, Pipeline, d
     metadata: dict[str, Any] | None = None
     if metadata_path.exists():
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        expected_sha256 = metadata.get("model_sha256")
+        allow_unsigned = os.environ.get("SPUNCAST_ML_ALLOW_UNSIGNED_MODEL", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if not expected_sha256:
+            if not allow_unsigned:
+                raise ValueError(
+                    f"Model metadata {metadata_path} is missing 'model_sha256'. "
+                    "Retrain the model or set SPUNCAST_ML_ALLOW_UNSIGNED_MODEL=1 for temporary compatibility."
+                )
+        else:
+            actual_sha256 = compute_file_sha256(latest_model)
+            if actual_sha256 != expected_sha256:
+                raise ValueError(
+                    f"SHA-256 mismatch for model {latest_model}. "
+                    "Model artifact integrity check failed; refusing to load."
+                )
     return latest_model, pipeline, metadata
 
 

@@ -9,13 +9,15 @@ description = "Machine learning workflows for Spuncast heat-level scrap predicti
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "joblib>=1.4",
-  "numpy>=1.26",
-  "pandas>=2.2",
-  "psycopg2-binary>=2.9",
-  "pyarrow>=16.0",
-  "python-dotenv>=1.0",
-  "scikit-learn>=1.5",
+  "joblib==1.4.2",
+  "numpy==1.26.4",
+  "pandas==2.2.3",
+  "psycopg2-binary==2.9.10",
+  "pyarrow==16.1.0",
+  "python-dotenv==1.0.1",
+  "scikit-learn==1.4.2",
+  "scipy==1.13.1",
+  "threadpoolctl==3.5.0",
 ]
 
 [project.scripts]
