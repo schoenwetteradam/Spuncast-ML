@@ -27,11 +27,22 @@ LEAKAGE_REVIEW_COLUMNS = {
     "reason_code",
     "defect_type",
     "department",
+    "scrap_events_row_count",
+    "scrap_events_qty_sum",
+    "scrap_events_weight_lbs_sum",
+    "scrap_events_last_ts",
+    "scrap_distinct_reason_code_count",
+    "scrap_distinct_defect_type_count",
+    "scrap_reason_codes_csv",
+    "scrap_defect_types_csv",
+    "latest_decision_code",
+    "latest_risk_score",
 }
 
 IDENTIFIER_COLUMNS = {
     "heat_id",
     "heat_number",
+    "product_number",
 }
 
 HIGH_CARDINALITY_TEXT_COLUMNS = {
@@ -48,6 +59,7 @@ PRE_POUR_IN_PROCESS_EXCLUDED_COLUMNS = {
     "latest_scrap_ts",
     "reason_code_bucket",
     *LEAKAGE_REVIEW_COLUMNS,
+    "feature_cutoff_ts",
     "quantity_produced",
     "quantity_shipped",
     "quantity_on_hold",
@@ -66,18 +78,30 @@ PRE_POUR_IN_PROCESS_EXCLUDED_COLUMNS = {
 POST_RUN_DIAGNOSTIC_EXCLUDED_COLUMNS = {
     TARGET_COLUMN,
     "has_scrap",
+    "feature_cutoff_ts",
+    "latest_decision_code",
+    "latest_risk_score",
 }
 
 EARLY_REMELT_DECISION_EXCLUDED_COLUMNS = {
     TARGET_COLUMN,
     "has_scrap",
     "scrap_rate_pct",
+    "feature_cutoff_ts",
     "quantity_scrapped",
     "scrap_event_count",
     "scrap_event_quantity",
     "scrap_weight_lbs",
     "scrap_estimated_cost",
     "total_recorded_scrap_qty",
+    "scrap_events_row_count",
+    "scrap_events_qty_sum",
+    "scrap_events_weight_lbs_sum",
+    "scrap_events_last_ts",
+    "scrap_distinct_reason_code_count",
+    "scrap_distinct_defect_type_count",
+    "scrap_reason_codes_csv",
+    "scrap_defect_types_csv",
     "reason_code",
     "defect_type",
     "department",
@@ -90,6 +114,8 @@ EARLY_REMELT_DECISION_EXCLUDED_COLUMNS = {
     "quantity_on_hold",
     "lot_count",
     "latest_lot_date",
+    "latest_decision_code",
+    "latest_risk_score",
 }
 
 FEATURE_SET_EXCLUSIONS = {
