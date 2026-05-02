@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import math
 import os
@@ -85,6 +86,13 @@ def _prepare_inference_features(frame: pd.DataFrame, feature_set: str) -> pd.Dat
     for column in x.select_dtypes(include=["datetime", "datetimetz"]).columns:
         x[column] = pd.to_datetime(x[column], errors="coerce", utc=True).astype("int64") / 1_000_000_000
         x.loc[x[column] < 0, column] = pd.NA
+    for column in x.select_dtypes(include=["object"]).columns:
+        sample = x[column].dropna().head(20)
+        if sample.empty:
+            continue
+        if sample.apply(lambda v: isinstance(v, (_dt.date, _dt.datetime))).all():
+            x[column] = pd.to_datetime(x[column], errors="coerce", utc=True).astype("int64") / 1_000_000_000
+            x.loc[x[column] < 0, column] = pd.NA
     return x
 
 
