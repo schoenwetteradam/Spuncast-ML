@@ -17,6 +17,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
+    accuracy_score,
     average_precision_score,
     classification_report,
     confusion_matrix,
@@ -105,6 +106,7 @@ def build_rules_baseline(frame: pd.DataFrame) -> pd.Series:
 
 def collect_metrics(y_true: pd.Series, y_pred: pd.Series, y_score: pd.Series | None = None) -> dict[str, Any]:
     metrics: dict[str, Any] = {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
         "precision": float(precision_score(y_true, y_pred, zero_division=0)),
         "recall": float(recall_score(y_true, y_pred, zero_division=0)),
         "f1": float(f1_score(y_true, y_pred, zero_division=0)),
