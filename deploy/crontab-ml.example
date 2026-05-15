@@ -5,5 +5,8 @@
 # Daily drift report (06:00 UTC)
 0 6 * * * cd /opt/Spuncast-Operations/Spuncast-ML-main && docker compose run --rm spuncast-ml monitor-drift --feature-set early_remelt_decision >> reports/cron_drift.log 2>&1
 
+# Archive operator recommendations older than 60 days (07:15 UTC)
+15 7 * * * cd /opt/Spuncast-Operations/Spuncast-ML-main && docker compose run --rm spuncast-ml archive-recommendations --days 60 >> reports/cron_archive.log 2>&1
+
 # Live scorer (prefer systemd or compose restart policy; this is a simple keep-alive example)
 # */5 * * * * docker compose -f /opt/Spuncast-Operations/Spuncast-ML-main/docker-compose.yml --profile daemon up -d ml-score-daemon
