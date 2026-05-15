@@ -5,6 +5,8 @@ services:
     image: spuncast-ml:latest
     env_file:
       - .env
+    entrypoint: ["spuncast-ml"]
+    command: ["pipeline"]
     volumes:
       - ./data:/app/data
       - ./artifacts:/app/artifacts
@@ -12,3 +14,18 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  ml-score-daemon:
+    profiles: ["daemon"]
+    build:
+      context: .
+    image: spuncast-ml:latest
+    env_file:
+      - .env
+    entrypoint: ["python3", "scripts/score_heat_live.py"]
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+      - ./reports:/app/reports
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

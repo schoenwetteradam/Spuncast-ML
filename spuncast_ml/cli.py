@@ -8,6 +8,8 @@ from spuncast_ml.feedback import record_operator_feedback
 from spuncast_ml.inference import score_dataset
 from spuncast_ml.modeling import evaluate_latest_model, train_model
 from spuncast_ml.monitoring import generate_drift_report
+from spuncast_ml.promotion import promote_or_revert
+from spuncast_ml.reporting import generate_weekly_report
 
 
 def command_export() -> None:
@@ -48,6 +50,17 @@ def command_monitor_drift(
         categorical_tvd_threshold=categorical_tvd_threshold,
         unseen_category_threshold=unseen_category_threshold,
     )
+    print(json.dumps({"report_path": str(path)}, indent=2))
+
+
+def command_promote(feature_set: str, min_relative_improvement: float, dry_run: bool) -> None:
+    code = promote_or_revert(feature_set, min_relative_improvement, dry_run=dry_run)
+    if code != 0:
+        raise SystemExit(code)
+
+
+def command_weekly_report(output_path: str) -> None:
+    path = generate_weekly_report(output_path)
     print(json.dumps({"report_path": str(path)}, indent=2))
 
 
@@ -104,6 +117,21 @@ def build_parser() -> argparse.ArgumentParser:
     monitor_parser.add_argument("--categorical-tvd-threshold", type=float, default=0.2)
     monitor_parser.add_argument("--unseen-category-threshold", type=float, default=0.05)
 
+    promote_parser = subparsers.add_parser(
+        "promote",
+        help="Compare newest trained model to the previous artifact and delete the newest if it is not improved enough",
+    )
+    promote_parser.add_argument("--feature-set", choices=sorted(FEATURE_SET_EXCLUSIONS), default="early_remelt_decision")
+    promote_parser.add_argument("--min-relative-improvement", type=float, default=0.05)
+    promote_parser.add_argument("--dry-run", action="store_true")
+
+    weekly_report_parser = subparsers.add_parser("weekly-report", help="Emit an HTML summary from the latest evaluation and model metadata")
+    weekly_report_parser.add_argument(
+        "--output-path",
+        default="./reports/weekly_report.html",
+        help="Destination path for the generated HTML file",
+    )
+
     feedback_parser = subparsers.add_parser("feedback", help="Capture operator response to a recommendation")
     feedback_parser.add_argument("--feature-set", choices=sorted(FEATURE_SET_EXCLUSIONS), default=DEFAULT_FEATURE_SET)
     feedback_parser.add_argument("--heat-number", required=True)
@@ -144,6 +172,14 @@ def main() -> None:
             categorical_tvd_threshold=args.categorical_tvd_threshold,
             unseen_category_threshold=args.unseen_category_threshold,
         )
+    elif args.command == "promote":
+        command_promote(
+            feature_set=args.feature_set,
+            min_relative_improvement=args.min_relative_improvement,
+            dry_run=args.dry_run,
+        )
+    elif args.command == "weekly-report":
+        command_weekly_report(output_path=args.output_path)
     elif args.command == "feedback":
         command_feedback(
             feature_set=args.feature_set,
