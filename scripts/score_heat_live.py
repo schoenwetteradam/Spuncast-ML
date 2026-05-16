@@ -5,8 +5,12 @@ Polls the ``v_ml_heat_early_score_v1`` view for heats that have not yet been
 scored, runs inference with the ``early_remelt_decision`` feature set, and
 writes results to the ``ml_heat_scores`` table in the operations database.
 
-Heats scoring above ``REMELT_THRESHOLD`` are additionally inserted into
-``heat_recommendations`` as hold candidates.
+Heats at or above ``SCORE_REMELT_THRESHOLD`` are treated as positive scrap-risk
+flags for ``ml_heat_scores``.  Rows can optionally be mirrored into
+``heat_recommendations`` with Grafana-friendly ``decision_code`` values
+(``HOLD`` / ``CAUTION`` / ``ADVISORY``) using ``SCORE_HOLD_THRESHOLD`` and
+``SCORE_CAUTION_THRESHOLD``.  Set ``SCORE_WRITE_ADVISORY_ROWS=1`` to also insert
+lower-probability advisory rows down to ``SCORE_ADVISORY_THRESHOLD``.
 
 Optional SHAP summaries (``SCORE_ENABLE_SHAP=1``) are written to
 ``ml_heat_scores.explanation_json`` when that column exists (see
@@ -22,14 +26,19 @@ Environment variables (all optional, with defaults):
 
     SCORE_POLL_INTERVAL_SEC   – seconds between poll cycles  (default 180)
     SCORE_HORIZON_HOURS       – look-back window for new pours (default 8)
-    SCORE_REMELT_THRESHOLD    – probability above which a heat is flagged
+    SCORE_REMELT_THRESHOLD    – probability at/above which predicted_flag=1
                                 (default 0.65)
+    SCORE_HOLD_THRESHOLD      – decision_code HOLD when prob >= this (default 0.80)
+    SCORE_CAUTION_THRESHOLD   – CAUTION band floor (default 0.65)
+    SCORE_ADVISORY_THRESHOLD  – minimum prob for advisory inserts when
+                                SCORE_WRITE_ADVISORY_ROWS=1 (default 0.50)
+    SCORE_WRITE_ADVISORY_ROWS – set to 1 to insert CAUTION/ADVISORY rows below
+                                the remelt threshold down to advisory threshold
     SCORE_ENABLE_SHAP         – set to 1/true to compute SHAP summaries
     SCORE_SHAP_MAX_HEATS      – max rows per cycle to explain (default 10)
 """
 from __future__ import annotations
 
-import json
 import logging
 import math
 import os
@@ -58,6 +67,10 @@ from spuncast_ml.inference import (  # noqa: E402
 POLL_INTERVAL_SEC: int = int(os.environ.get("SCORE_POLL_INTERVAL_SEC", "180"))
 SCORE_HORIZON_HOURS: int = int(os.environ.get("SCORE_HORIZON_HOURS", "8"))
 REMELT_THRESHOLD: float = float(os.environ.get("SCORE_REMELT_THRESHOLD", "0.65"))
+HOLD_THRESHOLD: float = float(os.environ.get("SCORE_HOLD_THRESHOLD", "0.80"))
+CAUTION_THRESHOLD: float = float(os.environ.get("SCORE_CAUTION_THRESHOLD", "0.65"))
+ADVISORY_THRESHOLD: float = float(os.environ.get("SCORE_ADVISORY_THRESHOLD", "0.50"))
+WRITE_ADVISORY_ROWS: bool = os.environ.get("SCORE_WRITE_ADVISORY_ROWS", "").strip().lower() in {"1", "true", "yes"}
 FEATURE_SET: str = "early_remelt_decision"
 ENABLE_SHAP: bool = os.environ.get("SCORE_ENABLE_SHAP", "").strip().lower() in {"1", "true", "yes"}
 SHAP_MAX_HEATS: int = int(os.environ.get("SCORE_SHAP_MAX_HEATS", "10"))
@@ -133,6 +146,19 @@ def _shap_top_features(explainer: Any, row_frame: pd.DataFrame, top_k: int = 5) 
         return None
 
 
+def _recommendation_insert_min_probability() -> float:
+    return ADVISORY_THRESHOLD if WRITE_ADVISORY_ROWS else REMELT_THRESHOLD
+
+
+def decision_code_for_probability(probability: float) -> str:
+    """Map scrap probability to operator-facing decision tiers (see configuration guide)."""
+    if probability >= HOLD_THRESHOLD:
+        return "HOLD"
+    if probability >= CAUTION_THRESHOLD:
+        return "CAUTION"
+    return "ADVISORY"
+
+
 def _format_shap_note(payload: dict[str, float] | None) -> str | None:
     if not payload:
         return None
@@ -140,15 +166,21 @@ def _format_shap_note(payload: dict[str, float] | None) -> str | None:
     return "SHAP drivers: " + ", ".join(bits)
 
 
-def insert_remelt_recommendation(
+def upsert_heat_recommendation(
     cursor: Any,
     heat_number: str,
     probability: float,
+    decision_code: str,
     primary_driver: str | None,
     extra_note: str | None = None,
 ) -> None:
-    """Insert a hold recommendation for a high-risk heat."""
-    text = "Re-melt candidate \u2014 high scrap probability before blast"
+    """Upsert a Grafana-facing recommendation row for the current heat."""
+    templates = {
+        "HOLD": "Re-melt candidate \u2014 high scrap probability before blast",
+        "CAUTION": "Elevated scrap probability \u2014 increase monitoring before blast",
+        "ADVISORY": "Advisory scrap signal \u2014 review process indicators before next operations",
+    }
+    text = templates.get(decision_code, templates["ADVISORY"])
     if extra_note:
         text = f"{text} \u2014 {extra_note}"[:4000]
     cursor.execute(
@@ -159,10 +191,11 @@ def insert_remelt_recommendation(
         "SET scrap_probability = EXCLUDED.scrap_probability, "
         "    primary_driver = EXCLUDED.primary_driver, "
         "    recommendation_text = EXCLUDED.recommendation_text, "
+        "    decision_code = EXCLUDED.decision_code, "
         "    created_at = NOW()",
         (
             heat_number,
-            "HOLD",
+            decision_code,
             text,
             primary_driver,
             probability,
@@ -257,12 +290,14 @@ def write_scores(
                         model_version,
                     ),
                 )
-            if probability >= REMELT_THRESHOLD:
+            insert_min = _recommendation_insert_min_probability()
+            if probability >= insert_min:
                 raw_row = raw_frame.loc[idx] if idx in raw_frame.index else row
                 driver = _top_contributing_feature(raw_row, feature_columns)
                 tops = shap_payload.get("top_features") if isinstance(shap_payload, dict) else None
                 note = _format_shap_note(tops) if isinstance(tops, dict) else None
-                insert_remelt_recommendation(cur, row["heat_number"], probability, driver, note)
+                tier = decision_code_for_probability(probability)
+                upsert_heat_recommendation(cur, row["heat_number"], probability, tier, driver, note)
     conn.commit()
 
 
@@ -307,11 +342,24 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    if not (REMELT_THRESHOLD <= CAUTION_THRESHOLD <= HOLD_THRESHOLD):
+        logger.warning(
+            "Score thresholds not monotonic (expected remelt <= caution <= hold): "
+            "remelt=%.3f caution=%.3f hold=%.3f",
+            REMELT_THRESHOLD,
+            CAUTION_THRESHOLD,
+            HOLD_THRESHOLD,
+        )
     logger.info(
-        "Starting live scoring daemon  poll=%ds  horizon=%dh  threshold=%.2f  shap=%s",
+        "Starting live scoring daemon  poll=%ds  horizon=%dh  remelt=%.2f hold=%.2f caution=%.2f "
+        "advisory_min=%.2f advisory_rows=%s shap=%s",
         POLL_INTERVAL_SEC,
         SCORE_HORIZON_HOURS,
         REMELT_THRESHOLD,
+        HOLD_THRESHOLD,
+        CAUTION_THRESHOLD,
+        ADVISORY_THRESHOLD,
+        WRITE_ADVISORY_ROWS,
         ENABLE_SHAP,
     )
 

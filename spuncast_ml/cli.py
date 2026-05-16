@@ -9,6 +9,7 @@ from spuncast_ml.inference import score_dataset
 from spuncast_ml.modeling import evaluate_latest_model, train_model
 from spuncast_ml.monitoring import generate_drift_report
 from spuncast_ml.promotion import promote_or_revert
+from spuncast_ml.recommendations_archive import archive_recommendations
 from spuncast_ml.reporting import generate_weekly_report
 
 
@@ -62,6 +63,13 @@ def command_promote(feature_set: str, min_relative_improvement: float, dry_run: 
 def command_weekly_report(output_path: str) -> None:
     path = generate_weekly_report(output_path)
     print(json.dumps({"report_path": str(path)}, indent=2))
+
+
+def command_archive_recommendations(days: int) -> None:
+    summary = archive_recommendations(days=days)
+    print(json.dumps(summary, indent=2))
+    if summary.get("status") != "ok":
+        raise SystemExit(1)
 
 
 def command_feedback(
@@ -132,6 +140,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Destination path for the generated HTML file",
     )
 
+    archive_parser = subparsers.add_parser(
+        "archive-recommendations",
+        help="Move aged heat_recommendations rows into heat_recommendations_archive",
+    )
+    archive_parser.add_argument("--days", type=int, default=60, help="Archive rows older than this many days (default 60).")
+
     feedback_parser = subparsers.add_parser("feedback", help="Capture operator response to a recommendation")
     feedback_parser.add_argument("--feature-set", choices=sorted(FEATURE_SET_EXCLUSIONS), default=DEFAULT_FEATURE_SET)
     feedback_parser.add_argument("--heat-number", required=True)
@@ -180,6 +194,8 @@ def main() -> None:
         )
     elif args.command == "weekly-report":
         command_weekly_report(output_path=args.output_path)
+    elif args.command == "archive-recommendations":
+        command_archive_recommendations(days=args.days)
     elif args.command == "feedback":
         command_feedback(
             feature_set=args.feature_set,
