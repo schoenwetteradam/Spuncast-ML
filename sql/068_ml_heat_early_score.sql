@@ -32,6 +32,7 @@ SELECT
     pl.tap_temp - pl.pour_temp AS tap_minus_pour_temp,
     pl.tap_temp - pl.die_temp_before_pour AS tap_minus_die_temp,
     pl.pour_temp - pl.die_temp_before_pour AS pour_minus_die_temp,
+    vhc.cr_pct,
     -- Per-element chemistry actuals (pivoted from chem_readings)
     MAX(CASE WHEN cr.element_code = 'CR' THEN cr.actual_value END) AS chem_cr,
     MAX(CASE WHEN cr.element_code = 'NI' THEN cr.actual_value END) AS chem_ni,
@@ -62,4 +63,4 @@ GROUP BY
     vhc.die_pct_of_band, vhc.rpm_deviation_pct,
     vhc.chem_element_count, vhc.chem_ok_count,
     vhc.chem_low_count, vhc.chem_high_count,
-    vhc.chem_heat_status, vhc.has_scrap;
+    vhc.chem_heat_status, vhc.cr_pct, vhc.has_scrap;
