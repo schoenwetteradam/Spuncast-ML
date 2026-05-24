@@ -325,7 +325,11 @@ def scoring_loop(*, dry_run: bool = False, limit: int | None = None) -> int:
     with get_conn() as conn:
         df = get_unscored_heats(conn, limit=limit)
         if df.empty:
-            logger.debug("No unscored heats found.")
+            logger.info(
+                "No unscored heats in the early-score view (horizon=%dh, limit=%s); nothing to score this cycle.",
+                SCORE_HORIZON_HOURS,
+                limit,
+            )
             return 0
 
         x = _prepare_inference_features(df, FEATURE_SET)
