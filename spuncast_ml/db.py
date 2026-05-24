@@ -35,7 +35,13 @@ def get_conn() -> Iterator[psycopg2.extensions.connection]:
 
 def fetch_dataframe(sql: str) -> pd.DataFrame:
     with get_conn() as conn:
-        return pd.read_sql_query(sql, conn)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="pandas only supports SQLAlchemy connectable.*",
+                category=UserWarning,
+            )
+            return pd.read_sql_query(sql, conn)
 
 
 def ensure_dir(path: str | Path) -> Path:
