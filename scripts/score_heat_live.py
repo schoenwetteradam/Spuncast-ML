@@ -49,6 +49,7 @@ import math
 import os
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -103,7 +104,13 @@ def get_unscored_heats(conn: Any, limit: int | None = None) -> pd.DataFrame:
         if limit < 1:
             raise ValueError("limit must be >= 1 when provided")
         sql = f"{sql} LIMIT {int(limit)}"
-    return pd.read_sql_query(sql, conn)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="pandas only supports SQLAlchemy connectable.*",
+            category=UserWarning,
+        )
+        return pd.read_sql_query(sql, conn)
 
 
 def _top_contributing_feature(row: pd.Series, feature_columns: list[str]) -> str | None:

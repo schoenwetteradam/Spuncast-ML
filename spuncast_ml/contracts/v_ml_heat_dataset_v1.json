@@ -51,6 +51,7 @@
     "tap_minus_pour_temp",
     "tap_minus_die_temp",
     "pour_minus_die_temp",
+    "cr_pct",
     "chem_element_count",
     "chem_ok_count",
     "chem_low_count",
