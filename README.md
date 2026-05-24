@@ -224,6 +224,13 @@ Use ML in three controlled stages before any automation:
 `monitor-drift` should run on a schedule (for example each shift or each day)
 to identify retraining triggers before performance degrades.
 
+## Plant deployment narrative
+
+Cross-team checklist (live scorer dry-run, Grafana queries against actual
+`heat_recommendations` columns, weekly pipeline, archival):
+
+- [`docs/ML_DEPLOYMENT_PLAN_POST_CHEMISTRY_AUDIT.md`](docs/ML_DEPLOYMENT_PLAN_POST_CHEMISTRY_AUDIT.md)
+
 ## Relationship to Spuncast-Operations
 
 - Upstream SQL contract reference: `067_ml_heat_dataset.sql`

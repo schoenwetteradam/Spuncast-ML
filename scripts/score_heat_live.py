@@ -22,6 +22,10 @@ Run as a long-lived background process::
 
     python scripts/score_heat_live.py
 
+Read-only smoke test (no writes to ``ml_heat_scores`` or ``heat_recommendations``)::
+
+    python scripts/score_heat_live.py --dry-run --once --test-heats 100
+
 Environment variables (all optional, with defaults):
 
     SCORE_POLL_INTERVAL_SEC   – seconds between poll cycles  (default 180)
@@ -39,6 +43,7 @@ Environment variables (all optional, with defaults):
 """
 from __future__ import annotations
 
+import argparse
 import logging
 import math
 import os
@@ -85,7 +90,7 @@ def _safe_float(value: float | int | None) -> float | None:
     return numeric if math.isfinite(numeric) else None
 
 
-def get_unscored_heats(conn: Any) -> pd.DataFrame:
+def get_unscored_heats(conn: Any, limit: int | None = None) -> pd.DataFrame:
     """Return rows from the early-score view that have no entry in ``ml_heat_scores``."""
     sql = (
         "SELECT v.* "
@@ -94,6 +99,10 @@ def get_unscored_heats(conn: Any) -> pd.DataFrame:
         "WHERE s.heat_number IS NULL "
         "  AND v.pour_date >= NOW() - INTERVAL '%s hours'"
     ) % SCORE_HORIZON_HOURS
+    if limit is not None:
+        if limit < 1:
+            raise ValueError("limit must be >= 1 when provided")
+        sql = f"{sql} LIMIT {int(limit)}"
     return pd.read_sql_query(sql, conn)
 
 
@@ -301,16 +310,16 @@ def write_scores(
     conn.commit()
 
 
-def scoring_loop() -> None:
-    """Single poll-score-write cycle."""
+def scoring_loop(*, dry_run: bool = False, limit: int | None = None) -> int:
+    """Single poll-score-write cycle. Returns the number of heats scored this cycle."""
     model_path, pipeline, _model_metadata = _load_latest_model_and_metadata(FEATURE_SET)
     model_version = model_path.stem
 
     with get_conn() as conn:
-        df = get_unscored_heats(conn)
+        df = get_unscored_heats(conn, limit=limit)
         if df.empty:
             logger.debug("No unscored heats found.")
-            return
+            return 0
 
         x = _prepare_inference_features(df, FEATURE_SET)
         feature_columns = list(x.columns)
@@ -329,15 +338,61 @@ def scoring_loop() -> None:
             index=df.index,
         )
 
+        if dry_run:
+            logger.info(
+                "Dry-run: loaded model %s  unscored_heats=%d  (no database writes)",
+                model_version,
+                len(scored),
+            )
+            preview = scored.sort_values("scrap_probability", ascending=False).head(15)
+            for _, r in preview.iterrows():
+                tier = decision_code_for_probability(float(r["scrap_probability"]))
+                logger.info(
+                    "  %s  P(scrap)=%.3f  tier=%s  remelt_flag=%s",
+                    r["heat_number"],
+                    float(r["scrap_probability"]),
+                    tier,
+                    int(r["predicted_scrap_flag"]),
+                )
+            logger.info("Dry-run completed; no changes written to the database")
+            return len(scored)
+
         explainer = _build_shap_explainer(pipeline, x) if ENABLE_SHAP else None
         order = scored["scrap_probability"].sort_values(ascending=False).index.tolist()
         shap_allow = set(order[: max(0, SHAP_MAX_HEATS)])
 
         write_scores(conn, df, scored, feature_columns, model_version, x, explainer, shap_allow)
         logger.info("Scored %d heats (%d flagged)", len(scored), int(predictions.sum()))
+        return len(scored)
 
 
-def main() -> None:
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Near-real-time heat scoring daemon (see module docstring).")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Score in memory and log a sample; do not write to ml_heat_scores or heat_recommendations.",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single scoring cycle then exit (default is to poll forever).",
+    )
+    parser.add_argument(
+        "--test-heats",
+        "--limit",
+        type=int,
+        default=None,
+        dest="limit",
+        metavar="N",
+        help="Max unscored heats to fetch from v_ml_heat_early_score_v1 this cycle (testing).",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _build_arg_parser().parse_args(argv)
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -352,7 +407,7 @@ def main() -> None:
         )
     logger.info(
         "Starting live scoring daemon  poll=%ds  horizon=%dh  remelt=%.2f hold=%.2f caution=%.2f "
-        "advisory_min=%.2f advisory_rows=%s shap=%s",
+        "advisory_min=%.2f advisory_rows=%s shap=%s  dry_run=%s  once=%s  limit=%s",
         POLL_INTERVAL_SEC,
         SCORE_HORIZON_HOURS,
         REMELT_THRESHOLD,
@@ -361,15 +416,25 @@ def main() -> None:
         ADVISORY_THRESHOLD,
         WRITE_ADVISORY_ROWS,
         ENABLE_SHAP,
+        args.dry_run,
+        args.once,
+        args.limit,
     )
+    if args.dry_run and not args.once:
+        logger.warning(
+            "--dry-run without --once will re-score the same unscored heats on every poll interval "
+            "because nothing is written to ml_heat_scores; prefer --dry-run --once for tests."
+        )
 
     while True:
         try:
-            scoring_loop()
+            scoring_loop(dry_run=args.dry_run, limit=args.limit)
         except FileNotFoundError as exc:
             logger.error("Model not found — train first: %s", exc)
         except Exception:
             logger.exception("Scoring loop error")
+        if args.once:
+            break
         time.sleep(POLL_INTERVAL_SEC)
 
 

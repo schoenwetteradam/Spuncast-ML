@@ -58,3 +58,6 @@ Three feature sets are defined in `spuncast_ml/dataset.py`:
 `v_ml_heat_early_score_v1` every N seconds and writes to `ml_heat_scores` and
 `heat_recommendations` tables. Configurable via environment variables
 (`SCORE_POLL_INTERVAL_SEC`, `SCORE_HORIZON_HOURS`, `SCORE_REMELT_THRESHOLD`).
+For a read-only connectivity test against the live DB, run
+`python scripts/score_heat_live.py --dry-run --once --test-heats 100` (see
+`docs/ML_DEPLOYMENT_PLAN_POST_CHEMISTRY_AUDIT.md`).
