@@ -11,12 +11,13 @@ from typing import Any
 
 import pandas as pd
 
-from spuncast_ml.contract import DEFAULT_CONTRACT_VERSION, validate_contract_columns
+from spuncast_ml.contract import DEFAULT_CONTRACT_VERSION, load_contract, validate_contract_columns
 from spuncast_ml.db import ensure_dir, fetch_dataframe, source_view
 
 TARGET_COLUMN = "scrap_flag"
 TIME_COLUMN = "analysis_date"
 DEFAULT_FEATURE_SET = "pre_pour_in_process"
+EARLY_REMELT_SCORE_CONTRACT = "v_ml_heat_early_score_v1"
 
 LEAKAGE_REVIEW_COLUMNS = {
     "quantity_scrapped",
@@ -249,6 +250,10 @@ def build_feature_frame(frame: pd.DataFrame, feature_set: str = DEFAULT_FEATURE_
         }
     )
     x = frame.drop(columns=drop_columns, errors="ignore").copy()
+    if feature_set == "early_remelt_decision":
+        early_allowed = set(load_contract(EARLY_REMELT_SCORE_CONTRACT)["expected_columns"])
+        early_allowed.discard(TARGET_COLUMN)
+        x = x[[column for column in x.columns if column in early_allowed]].copy()
     for column in x.select_dtypes(include=["datetime", "datetimetz"]).columns:
         x[column] = pd.to_datetime(x[column], errors="coerce", utc=True).astype("int64") / 1_000_000_000
         x.loc[x[column] < 0, column] = pd.NA
