@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -48,4 +49,3 @@ def ensure_dir(path: str | Path) -> Path:
     resolved = Path(path).resolve()
     resolved.mkdir(parents=True, exist_ok=True)
     return resolved
-
