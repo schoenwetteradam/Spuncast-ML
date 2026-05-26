@@ -66,10 +66,11 @@ Each export writes:
 
 ## Feature-set guardrails
 
-Two explicit feature sets are supported:
+Three explicit feature sets are supported:
 
 - `pre_pour_in_process` for operational prediction
 - `post_run_diagnostic` for retrospective analysis and explainability
+- `early_remelt_decision` for near-real-time re-melt scoring (see `v_ml_heat_early_score_v1`)
 
 The operational feature set excludes leakage-prone scrap outcome columns and
 other likely post-outcome fields such as scrap quantities, scrap reason fields,
