@@ -35,6 +35,13 @@ Three feature sets are defined in `spuncast_ml/dataset.py`:
 | `post_run_diagnostic`     | Retrospective analysis                        |
 | `early_remelt_decision`   | Near-real-time re-melt go/no-go call (new)    |
 
+### Upstream views (Spuncast-Operations)
+
+| Use case | View | Notes |
+|----------|------|-------|
+| Training / batch export (labels + full context) | `v_ml_heat_dataset_v1` | Defined in `067_ml_heat_dataset.sql` (this repo’s copy of the Operations migration). One row per heat from `v_heat_complete` with scrap labels and aggregates — many columns are label-only or post-outcome; feature sets in `spuncast_ml/dataset.py` control which columns are model inputs. |
+| Live scoring (pre-outcome) | `v_ml_heat_early_score_v1` | Defined in `sql/068_ml_heat_early_score.sql`. Pour-time slice (pour logs, `v_heat_complete` process bands, pivoted chemistry) for near-real-time scoring. The view may still include `scrap_flag` for offline checks; the `early_remelt_decision` feature set excludes the target and other leakage columns when building inference features. |
+
 ### Key directories
 
 | Path                       | Contents                            |
