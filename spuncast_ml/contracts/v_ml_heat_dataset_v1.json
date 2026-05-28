@@ -96,6 +96,11 @@
     "scrap_flag",
     "reason_code_bucket",
     "latest_decision_code",
-    "latest_risk_score"
+    "latest_risk_score",
+    "instruction_source",
+    "tap_deviation_from_instruction_pct",
+    "pour_deviation_from_instruction_pct",
+    "die_deviation_from_instruction_pct",
+    "rpm_deviation_from_instruction_pct"
   ]
 }
