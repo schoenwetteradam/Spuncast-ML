@@ -1,6 +1,6 @@
 {
   "contract_version": "v_ml_heat_early_score_v1",
-  "schema_version_note": "112_fps_auto_resolution.sql",
+  "schema_version_note": "113_charge_material_features.sql",
   "expected_columns": [
     "heat_id",
     "heat_number",
@@ -112,6 +112,13 @@
     "spin_time_deviation_from_fps_pct",
     "pour_time_deviation_from_fps_pct",
     "wrong_funnel_flag",
-    "funnel_deviation_from_fps_pct"
+    "funnel_deviation_from_fps_pct",
+    "charge_material_count",
+    "charge_distinct_material_count",
+    "charge_total_weight_lbs",
+    "charge_scrap_weight_lbs",
+    "charge_virgin_weight_lbs",
+    "charge_scrap_pct",
+    "charge_virgin_pct"
   ]
 }
