@@ -120,7 +120,10 @@ def _top_contributing_feature(row: pd.Series, feature_columns: list[str]) -> str
     for col in feature_columns:
         val = row.get(col)
         if val is not None and not (isinstance(val, float) and math.isnan(val)):
-            abs_val = abs(float(val))
+            try:
+                abs_val = abs(float(val))
+            except (ValueError, TypeError):
+                continue
             if abs_val > best_val:
                 best_val = abs_val
                 best_col = col

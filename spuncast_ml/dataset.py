@@ -62,6 +62,8 @@ PRE_POUR_IN_PROCESS_EXCLUDED_COLUMNS = {
     "reason_code_bucket",
     *LEAKAGE_REVIEW_COLUMNS,
     "feature_cutoff_ts",
+    # analysis_date is the chronological split key; not present in v_ml_heat_early_score_v1
+    "analysis_date",
     "quantity_produced",
     "quantity_shipped",
     "quantity_on_hand",
@@ -123,6 +125,10 @@ EARLY_REMELT_DECISION_EXCLUDED_COLUMNS = {
     "latest_risk_score",
     # instruction_source is data-entry metadata, not a process signal
     "instruction_source",
+    # fps_die_number / fps_material_name duplicate die_no / alloy_grade — exclude to avoid
+    # redundant one-hot dimensions; keep numeric fps_* targets and deviation columns
+    "fps_die_number",
+    "fps_material_name",
 }
 
 FEATURE_SET_EXCLUSIONS = {
