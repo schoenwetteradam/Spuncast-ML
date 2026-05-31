@@ -40,6 +40,10 @@ Environment variables (all optional, with defaults):
                                 the remelt threshold down to advisory threshold
     SCORE_ENABLE_SHAP         – set to 1/true to compute SHAP summaries
     SCORE_SHAP_MAX_HEATS      – max rows per cycle to explain (default 10)
+    TEAMS_WEBHOOK_URL         – Microsoft Teams incoming webhook URL; when set,
+                                posts a card for every heat scored
+    TEAMS_MIN_PROBABILITY     – only notify when P(scrap) >= this (default 0.0,
+                                i.e. notify for every scored heat)
 """
 from __future__ import annotations
 
@@ -49,6 +53,7 @@ import math
 import os
 import sys
 import time
+import urllib.request
 import warnings
 from pathlib import Path
 from typing import Any
@@ -80,8 +85,70 @@ WRITE_ADVISORY_ROWS: bool = os.environ.get("SCORE_WRITE_ADVISORY_ROWS", "").stri
 FEATURE_SET: str = "early_remelt_decision"
 ENABLE_SHAP: bool = os.environ.get("SCORE_ENABLE_SHAP", "").strip().lower() in {"1", "true", "yes"}
 SHAP_MAX_HEATS: int = int(os.environ.get("SCORE_SHAP_MAX_HEATS", "10"))
+TEAMS_WEBHOOK_URL: str = os.environ.get("TEAMS_WEBHOOK_URL", "").strip()
+TEAMS_MIN_PROBABILITY: float = float(os.environ.get("TEAMS_MIN_PROBABILITY", "0.0"))
 
 logger = logging.getLogger("score_heat_live")
+
+
+def _tier_color(decision_code: str) -> str:
+    return {"HOLD": "FF0000", "CAUTION": "FFA500", "ADVISORY": "0078D4"}.get(decision_code, "808080")
+
+
+def send_teams_notification(
+    heat_number: str,
+    probability: float,
+    decision_code: str,
+    primary_driver: str | None,
+    dry_run: bool = False,
+) -> None:
+    if not TEAMS_WEBHOOK_URL:
+        return
+    if probability < TEAMS_MIN_PROBABILITY:
+        return
+    pct = f"{probability * 100:.1f}%"
+    tier_labels = {
+        "HOLD": "🔴 HOLD — Re-melt candidate",
+        "CAUTION": "🟠 CAUTION — Elevated risk",
+        "ADVISORY": "🔵 ADVISORY — Monitor closely",
+    }
+    facts = [
+        {"name": "Heat Number", "value": heat_number},
+        {"name": "Scrap Probability", "value": pct},
+        {"name": "Decision", "value": tier_labels.get(decision_code, decision_code)},
+    ]
+    if primary_driver:
+        facts.append({"name": "Top Signal", "value": primary_driver.replace("_", " ")})
+
+    payload = {
+        "@type": "MessageCard",
+        "@context": "http://schema.org/extensions",
+        "themeColor": _tier_color(decision_code),
+        "summary": f"Heat {heat_number} scored — P(scrap)={pct}",
+        "sections": [
+            {
+                "activityTitle": f"ML Score: Heat **{heat_number}**",
+                "activitySubtitle": "Early Remelt Decision Model",
+                "facts": facts,
+            }
+        ],
+    }
+    if dry_run:
+        logger.info("Dry-run: would notify Teams for heat %s P=%.3f %s", heat_number, probability, decision_code)
+        return
+    try:
+        body = __import__("json").dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            TEAMS_WEBHOOK_URL,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            if resp.status not in (200, 202):
+                logger.warning("Teams webhook returned HTTP %s for heat %s", resp.status, heat_number)
+    except Exception:
+        logger.warning("Teams webhook failed for heat %s", heat_number, exc_info=True)
 
 
 def _safe_float(value: float | int | None) -> float | None:
@@ -244,6 +311,7 @@ def write_scores(
     x_features: pd.DataFrame,
     explainer: Any | None,
     shap_index_allowlist: set[Any],
+    dry_run: bool = False,
 ) -> None:
     """Persist scores to ``ml_heat_scores`` and optionally ``heat_recommendations``."""
     include_json = _ml_scores_has_explanation_column(conn)
@@ -310,13 +378,14 @@ def write_scores(
                     ),
                 )
             insert_min = _recommendation_insert_min_probability()
+            raw_row = raw_frame.loc[idx] if idx in raw_frame.index else row
+            driver = _top_contributing_feature(raw_row, feature_columns)
+            tier = decision_code_for_probability(probability)
             if probability >= insert_min:
-                raw_row = raw_frame.loc[idx] if idx in raw_frame.index else row
-                driver = _top_contributing_feature(raw_row, feature_columns)
                 tops = shap_payload.get("top_features") if isinstance(shap_payload, dict) else None
                 note = _format_shap_note(tops) if isinstance(tops, dict) else None
-                tier = decision_code_for_probability(probability)
                 upsert_heat_recommendation(cur, row["heat_number"], probability, tier, driver, note)
+            send_teams_notification(row["heat_number"], probability, tier, driver, dry_run=dry_run)
     conn.commit()
 
 
@@ -375,7 +444,7 @@ def scoring_loop(*, dry_run: bool = False, limit: int | None = None) -> int:
         order = scored["scrap_probability"].sort_values(ascending=False).index.tolist()
         shap_allow = set(order[: max(0, SHAP_MAX_HEATS)])
 
-        write_scores(conn, df, scored, feature_columns, model_version, x, explainer, shap_allow)
+        write_scores(conn, df, scored, feature_columns, model_version, x, explainer, shap_allow, dry_run=dry_run)
         logger.info("Scored %d heats (%d flagged)", len(scored), int(predictions.sum()))
         return len(scored)
 
