@@ -4,18 +4,19 @@ causal_analysis.py — DoWhy causal analysis of foundry scrap drivers.
 
 For each key process variable (tap/pour/die temp deviation, RPM deviation,
 charge composition, chemistry compliance), estimates the causal effect on
-scrap_flag using backdoor identification and linear regression, then
-validates each finding with a placebo refutation test.
+scrap_flag using backdoor identification + linear regression, then validates
+each finding with a placebo refutation test.
+
+Results are written to:
+  - reports/causal_<scope>_<timestamp>.html  (human-readable)
+  - reports/causal_<scope>_<timestamp>.json  (machine-readable)
+  - PostgreSQL causal_analysis_results table (for web UI)
 
 Usage:
     python scripts/causal_analysis.py                       # all heats
     python scripts/causal_analysis.py --product CAT536-6768
     python scripts/causal_analysis.py --grade HU
-    python scripts/causal_analysis.py --product CAT536-6768 --min-rows 50
-
-Output:
-    reports/causal_<scope>_<timestamp>.json
-    reports/causal_<scope>_<timestamp>.html   (human-readable summary)
+    python scripts/causal_analysis.py --product CAT536-6768 --simulations 200
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import warnings
 from datetime import datetime, timezone
@@ -33,6 +35,23 @@ import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
+
+# Load .env so DATABASE_URL is available.
+# Check REPO_ROOT/.env first, then sibling Spuncast-Operations-main/.env
+# (used when ML repo lives alongside the operations repo on the VM).
+try:
+    from dotenv import load_dotenv
+    _env_candidates = [
+        REPO_ROOT / ".env",
+        REPO_ROOT.parent / "Spuncast-Operations-main" / ".env",
+        REPO_ROOT.parent / ".env",
+    ]
+    for _env_path in _env_candidates:
+        if _env_path.exists():
+            load_dotenv(_env_path)
+            break
+except ImportError:
+    pass
 
 from spuncast_ml.causal.dag import (
     COMMON_CONFOUNDERS,
@@ -47,7 +66,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 REPORTS_DIR = REPO_ROOT / "reports"
 EXPORTS_DIR = REPO_ROOT / "data" / "exports"
 MIN_ROWS_DEFAULT = 100
-REFUTATION_SIMULATIONS = 50   # keep fast; increase to 200+ for final reports
+REFUTATION_SIMULATIONS = 50
 
 
 # ── Data loading ──────────────────────────────────────────────────────────────
@@ -62,7 +81,6 @@ def load_latest_export() -> pd.DataFrame:
 
 
 def prepare_frame(df: pd.DataFrame, product: str | None, grade: str | None) -> pd.DataFrame:
-    """Filter, select, and clean the dataframe for causal analysis."""
     if product:
         df = df[df["product_number"].astype(str).str.upper() == product.upper()].copy()
         log.info("Filtered to product %s: %d heats", product, len(df))
@@ -72,9 +90,9 @@ def prepare_frame(df: pd.DataFrame, product: str | None, grade: str | None) -> p
 
     required = [OUTCOME] + COMMON_CONFOUNDERS + [t["name"] for t in TREATMENTS]
     available = [c for c in required if c in df.columns]
-    df = df[list(set(available + ["heat_number", "product_number", "alloy_grade"]))].copy()
+    extra = [c for c in ["heat_number", "product_number", "alloy_grade", "reason_code_bucket"] if c in df.columns]
+    df = df[list(set(available + extra))].copy()
 
-    # Encode categoricals as integer codes so DoWhy can handle them
     for col in COMMON_CONFOUNDERS:
         if col in df.columns and df[col].dtype == object:
             df[col] = pd.Categorical(df[col]).codes
@@ -86,16 +104,12 @@ def prepare_frame(df: pd.DataFrame, product: str | None, grade: str | None) -> p
 # ── Single-treatment causal analysis ─────────────────────────────────────────
 
 def _run_one_treatment(df: pd.DataFrame, treatment: dict) -> dict:
-    """Run a single treatment's causal analysis. Returns a result dict."""
     try:
-        import dowhy
         from dowhy import CausalModel
     except ImportError:
         raise RuntimeError("dowhy is not installed. Run: pip install dowhy")
 
     tname = treatment["name"]
-
-    # Drop rows missing treatment or outcome
     cols_needed = [tname, OUTCOME] + [c for c in COMMON_CONFOUNDERS if c in df.columns]
     sub = df[cols_needed].dropna()
 
@@ -130,9 +144,6 @@ def _run_one_treatment(df: pd.DataFrame, treatment: dict) -> dict:
                 proceed_when_unidentifiable=True,
             )
             estimand = model.identify_effect(proceed_when_unidentifiable=True)
-
-            # Use linear regression — robust, interpretable, works for both
-            # continuous and binary treatments with a binary outcome (LPM).
             estimate = model.estimate_effect(
                 estimand,
                 method_name="backdoor.linear_regression",
@@ -154,9 +165,6 @@ def _run_one_treatment(df: pd.DataFrame, treatment: dict) -> dict:
             result["ci_lower"] = round(ci_lower, 5) if ci_lower is not None else None
             result["ci_upper"] = round(ci_upper, 5) if ci_upper is not None else None
 
-            # Placebo refutation: replace treatment with random permutation.
-            # A good estimate should NOT survive (p ≥ 0.05 means placebo had
-            # similar effect, failing the test).
             refutation = model.refute_estimate(
                 estimand,
                 estimate,
@@ -167,7 +175,6 @@ def _run_one_treatment(df: pd.DataFrame, treatment: dict) -> dict:
             result["refutation_p_value"] = round(float(refutation.refutation_result.get("p_value", 1.0)), 4)
             result["passes_refutation"] = result["refutation_p_value"] < 0.10
 
-            # Human-readable interpretation
             sign = "increases" if ate > 0 else "decreases"
             magnitude = abs(ate) * 100
             result["interpretation"] = (
@@ -184,14 +191,9 @@ def _run_one_treatment(df: pd.DataFrame, treatment: dict) -> dict:
     return result
 
 
-# ── Per-reason analysis ───────────────────────────────────────────────────────
+# ── Per-reason signal analysis ────────────────────────────────────────────────
 
 def reason_split_analysis(df: pd.DataFrame) -> list[dict]:
-    """
-    Break down which treatments are most associated with each scrap reason bucket.
-    Uses simple mean comparison (not full causal model) — a fast screen to
-    prioritize which reason codes to investigate further.
-    """
     if "reason_code_bucket" not in df.columns:
         return []
 
@@ -220,12 +222,94 @@ def reason_split_analysis(df: pd.DataFrame) -> list[dict]:
                 "avg_with_reason": round(float(scrap.mean()), 3),
                 "delta": round(delta, 3),
             })
-        # Sort by absolute delta descending
         row["signals"].sort(key=lambda x: abs(x["delta"]), reverse=True)
         results.append(row)
 
     results.sort(key=lambda x: x["n_heats"], reverse=True)
     return results
+
+
+# ── Database write ────────────────────────────────────────────────────────────
+
+def write_results_to_db(report: dict) -> None:
+    try:
+        import psycopg2
+    except ImportError:
+        log.warning("psycopg2 not available — skipping DB write")
+        return
+
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        log.warning("DATABASE_URL not set — skipping DB write")
+        return
+
+    scope = report["scope"]
+    scope_type = (
+        "product" if scope.get("product_number")
+        else "grade" if scope.get("alloy_grade")
+        else "global"
+    )
+    scope_value = scope.get("product_number") or scope.get("alloy_grade")
+    run_at = report["run_at"]
+
+    try:
+        conn = psycopg2.connect(db_url)
+        with conn.cursor() as cur:
+            # Replace existing rows for this scope
+            cur.execute(
+                "DELETE FROM causal_analysis_results WHERE scope_type=%s AND scope_value IS NOT DISTINCT FROM %s",
+                (scope_type, scope_value),
+            )
+            for r in report["results"]:
+                cur.execute(
+                    """
+                    INSERT INTO causal_analysis_results
+                        (scope_type, scope_value, treatment, label, treatment_type, unit,
+                         n_obs, effect_estimate, ci_lower, ci_upper, refutation_p_value,
+                         passes_refutation, interpretation, status, error_msg,
+                         run_at, n_heats, scrap_rate_pct)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        scope_type, scope_value,
+                        r.get("treatment"), r.get("label"), r.get("type"), r.get("unit"),
+                        r.get("n_obs"),
+                        r.get("effect_estimate"), r.get("ci_lower"), r.get("ci_upper"),
+                        r.get("refutation_p_value"), r.get("passes_refutation"),
+                        r.get("interpretation"), r.get("status", "ok"), r.get("error"),
+                        run_at, scope.get("n_heats"), scope.get("scrap_rate_pct"),
+                    ),
+                )
+
+            cur.execute(
+                "DELETE FROM causal_reason_signals WHERE scope_type=%s AND scope_value IS NOT DISTINCT FROM %s",
+                (scope_type, scope_value),
+            )
+            for rr in report.get("reason_analysis", []):
+                for sig in rr.get("signals", []):
+                    cur.execute(
+                        """
+                        INSERT INTO causal_reason_signals
+                            (scope_type, scope_value, reason_code, treatment, label,
+                             avg_no_reason, avg_with_reason, delta, n_heats, run_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        """,
+                        (
+                            scope_type, scope_value,
+                            rr["reason_code"], sig["treatment"], sig.get("label"),
+                            sig["avg_no_reason"], sig["avg_with_reason"], sig["delta"],
+                            rr["n_heats"], run_at,
+                        ),
+                    )
+        conn.commit()
+        log.info("Results written to DB (%s=%s)", scope_type, scope_value)
+    except Exception as exc:
+        log.warning("DB write failed: %s", exc)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 # ── HTML report ───────────────────────────────────────────────────────────────
@@ -235,27 +319,28 @@ def build_html_report(report: dict) -> str:
     results = report.get("results", [])
     reason_rows = report.get("reason_analysis", [])
 
-    def badge(passes: bool | None) -> str:
+    def badge(passes):
         if passes is True:
             return "<span style='color:green;font-weight:bold'>✓ confirmed</span>"
         if passes is False:
             return "<span style='color:orange'>⚠ not confirmed</span>"
         return "<span style='color:gray'>—</span>"
 
-    def effect_bar(ate: float | None) -> str:
+    def effect_bar(ate):
         if ate is None:
             return "—"
         color = "#c0392b" if ate > 0 else "#27ae60"
         width = min(abs(ate) * 2000, 100)
         return (
             f"<span style='color:{color};font-weight:bold'>{ate:+.4f}</span>"
-            f"<div style='background:{color};height:6px;width:{width:.0f}px;border-radius:3px;margin-top:3px'></div>"
+            f"<div style='background:{color};height:6px;width:{width:.0f}px;"
+            f"border-radius:3px;margin-top:3px'></div>"
         )
 
     rows = ""
     for r in results:
         if r.get("status") == "skipped":
-            rows += f"<tr><td>{r['label']}</td><td colspan=5 style='color:#999'>{r['reason']}</td></tr>"
+            rows += f"<tr><td>{r['label']}</td><td colspan=5 style='color:#999'>{r.get('reason','skipped')}</td></tr>"
             continue
         if r.get("status") == "error":
             rows += f"<tr><td>{r['label']}</td><td colspan=5 style='color:red'>{r.get('error','error')}</td></tr>"
@@ -274,7 +359,7 @@ def build_html_report(report: dict) -> str:
     reason_html = ""
     if reason_rows:
         reason_html = "<h2>Scrap Reason Signal Analysis</h2>"
-        reason_html += "<p style='color:#555;font-size:13px'>Mean difference in each treatment variable between heats with vs without each scrap reason. Not causal — use as a screen to prioritize further investigation.</p>"
+        reason_html += "<p style='color:#555;font-size:13px'>Mean difference in process variables between heats with vs without each scrap reason. Not fully causal — use as a screen to prioritize.</p>"
         for rr in reason_rows[:10]:
             reason_html += f"<h3>{rr['reason_code']} ({rr['n_heats']} heats)</h3><ul>"
             for s in rr["signals"][:5]:
@@ -306,39 +391,36 @@ tr:hover td{{background:#f0f6ff}}
 </div>
 <h2>Causal Effect Estimates on Scrap Probability</h2>
 <p style="color:#555;font-size:13px">
-Effect = change in scrap probability (0–1) per 1-unit increase in treatment,
-controlling for alloy grade and furnace. Positive = higher treatment value → more scrap.
-"Confirmed" means the estimate survives a placebo refutation test (p &lt; 0.10).
+Effect = change in scrap probability per 1-unit increase in treatment,
+controlling for alloy grade and furnace. Positive = higher value → more scrap.
+"Confirmed" = estimate survives placebo refutation test (p &lt; 0.10).
 </p>
 <table>
 <thead><tr>
-  <th>Treatment Variable</th><th>N Obs</th><th>Causal Effect (ATE)</th>
-  <th>95% CI</th><th>Placebo p-value</th><th>Confirmed</th>
+<th>Treatment Variable</th><th>N Obs</th><th>Causal Effect (ATE)</th>
+<th>95% CI</th><th>Placebo p-value</th><th>Confirmed</th>
 </tr></thead>
 <tbody>{rows}</tbody>
 </table>
 {reason_html}
-<hr>
-<p style="color:#aaa;font-size:11px">
-Generated by Spuncast-ML causal_analysis.py using DoWhy backdoor linear regression.
-Refutation: placebo permutation test with {REFUTATION_SIMULATIONS} simulations.
-</p>
-</body></html>"""
+<hr><p style="color:#aaa;font-size:11px">
+Generated by causal_analysis.py using DoWhy backdoor linear regression.
+Refutation: placebo permutation ({REFUTATION_SIMULATIONS} simulations).
+</p></body></html>"""
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    global REFUTATION_SIMULATIONS
     parser = argparse.ArgumentParser(description="Causal scrap analysis via DoWhy")
-    parser.add_argument("--product", default=None, help="Filter to a product number")
-    parser.add_argument("--grade", default=None, help="Filter to an alloy grade")
-    parser.add_argument("--min-rows", type=int, default=MIN_ROWS_DEFAULT,
-                        help=f"Minimum rows required to run (default {MIN_ROWS_DEFAULT})")
-    parser.add_argument("--simulations", type=int, default=REFUTATION_SIMULATIONS,
-                        help="Placebo refutation simulations (default 50; use 200 for final)")
+    parser.add_argument("--product", default=None)
+    parser.add_argument("--grade", default=None)
+    parser.add_argument("--min-rows", type=int, default=MIN_ROWS_DEFAULT)
+    parser.add_argument("--simulations", type=int, default=REFUTATION_SIMULATIONS)
+    parser.add_argument("--no-db", action="store_true", help="Skip DB write")
     args = parser.parse_args()
 
-    global REFUTATION_SIMULATIONS
     REFUTATION_SIMULATIONS = args.simulations
 
     df_raw = load_latest_export()
@@ -355,34 +437,28 @@ def main() -> None:
         else "All Heats"
     )
     scrap_rate = round(float(df[OUTCOME].mean()) * 100, 1) if OUTCOME in df.columns else None
-
-    log.info("Running causal analysis — scope: %s, n=%d, scrap_rate=%s%%", scope_label, n, scrap_rate)
+    log.info("Running analysis — scope: %s, n=%d, scrap_rate=%s%%", scope_label, n, scrap_rate)
 
     results = []
     for treatment in TREATMENTS:
         tname = treatment["name"]
         if tname not in df.columns:
-            log.info("Skipping %s (not in export)", tname)
             continue
-        log.info("Analyzing treatment: %s", tname)
+        log.info("Analyzing: %s", tname)
         res = _run_one_treatment(df, treatment)
         results.append(res)
-        status = res.get("status", "?")
-        if status == "ok":
+        if res.get("status") == "ok":
             log.info(
-                "  ATE=%.4f  CI=[%s, %s]  refute_p=%.3f  %s",
+                "  ATE=%+.4f  CI=[%s, %s]  p=%.3f  %s",
                 res.get("effect_estimate", 0),
-                res.get("ci_lower", "?"),
-                res.get("ci_upper", "?"),
+                res.get("ci_lower", "?"), res.get("ci_upper", "?"),
                 res.get("refutation_p_value", 1.0),
                 "CONFIRMED" if res.get("passes_refutation") else "not confirmed",
             )
-        else:
-            log.info("  status=%s reason=%s", status, res.get("reason", res.get("error", "")))
 
     reason_analysis = reason_split_analysis(df)
 
-    # Sort confirmed results first, then by abs(effect)
+    # Confirmed first, then by |effect|
     results.sort(key=lambda r: (
         0 if r.get("passes_refutation") else 1,
         -abs(r.get("effect_estimate") or 0),
@@ -409,21 +485,21 @@ def main() -> None:
 
     json_path.write_text(json.dumps(report, indent=2, default=str))
     html_path.write_text(build_html_report(report))
+    log.info("Report: %s", html_path)
 
-    log.info("Report written: %s", json_path)
-    log.info("HTML report:    %s", html_path)
+    if not args.no_db:
+        write_results_to_db(report)
 
-    # Print top findings to stdout
     confirmed = [r for r in results if r.get("passes_refutation") and r.get("status") == "ok"]
     if confirmed:
         print(f"\n=== CONFIRMED CAUSAL FINDINGS ({scope_label}) ===")
         for r in confirmed:
             print(f"  {r['label']:40s}  ATE={r['effect_estimate']:+.4f}  "
                   f"CI=[{r.get('ci_lower','?')}, {r.get('ci_upper','?')}]  "
-                  f"(p={r['refutation_p_value']:.3f})")
+                  f"p={r['refutation_p_value']:.3f}")
     else:
-        print(f"\nNo statistically confirmed causal findings for {scope_label}.")
-        print("Try --simulations 200 for more precise refutation tests.")
+        print(f"\nNo confirmed findings for {scope_label}. "
+              "Try --simulations 200 for tighter refutation tests.")
 
 
 if __name__ == "__main__":
