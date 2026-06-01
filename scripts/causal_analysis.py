@@ -122,6 +122,16 @@ def _run_one_treatment(df: pd.DataFrame, treatment: dict) -> dict:
             "n_obs": len(sub),
         }
 
+    # Skip zero-variance columns (e.g. all-zero charge_scrap_pct before .$$L ingestion)
+    if sub[tname].std() < 1e-9:
+        return {
+            "treatment": tname,
+            "label": treatment["label"],
+            "status": "skipped",
+            "reason": "No variation in this variable for this scope (all values identical — check data ingestion)",
+            "n_obs": len(sub),
+        }
+
     result: dict = {
         "treatment": tname,
         "label": treatment["label"],
@@ -153,7 +163,13 @@ def _run_one_treatment(df: pd.DataFrame, treatment: dict) -> dict:
                 method_params={"need_conditional_estimates": False},
             )
 
-            ate = float(estimate.value)
+            raw_ate = estimate.value
+            if raw_ate is None:
+                raise ValueError(
+                    "DoWhy could not estimate this effect — the causal path could not be identified. "
+                    "This usually means a required confounder is unobserved for this scope."
+                )
+            ate = float(raw_ate)
             try:
                 ci = estimate.get_confidence_intervals()
                 ci_lower = float(ci[0]) if ci is not None else None
@@ -177,11 +193,40 @@ def _run_one_treatment(df: pd.DataFrame, treatment: dict) -> dict:
 
             sign = "increases" if ate > 0 else "decreases"
             magnitude = abs(ate) * 100
-            result["interpretation"] = (
-                f"A 1-unit increase in {treatment['label']} ({treatment.get('unit', '')}) "
-                f"{sign} scrap probability by {magnitude:.1f} percentage points "
-                f"(controlling for alloy grade and furnace)."
-            )
+            tname_local = treatment["name"]
+            unit = treatment.get("unit", "")
+            if "from_instruction_pct" in tname_local or "from_fps_pct" in tname_local:
+                result["interpretation"] = (
+                    f"Running 1 full band-width outside the target {sign} scrap probability by "
+                    f"{magnitude:.1f} pp (e.g. ±0.5 = at the allowed limit; ±1.0 = one full range "
+                    f"outside spec). Controlling for alloy grade and furnace."
+                )
+            elif treatment.get("type") == "binary":
+                result["interpretation"] = (
+                    f"When {treatment['label']} = 1 (vs 0), scrap probability {sign} by "
+                    f"{magnitude:.1f} pp. Controlling for alloy grade and furnace."
+                )
+            elif "°F" in unit:
+                result["interpretation"] = (
+                    f"Each 1°F change in {treatment['label']} {sign} scrap probability by "
+                    f"{magnitude:.2f} pp. A 10°F shift changes risk by {magnitude * 10:.1f} pp. "
+                    f"Controlling for alloy grade and furnace."
+                )
+            elif "count" in unit:
+                result["interpretation"] = (
+                    f"Each additional element outside spec {sign} scrap probability by "
+                    f"{magnitude:.1f} pp. Controlling for alloy grade and furnace."
+                )
+            elif "%" in unit:
+                result["interpretation"] = (
+                    f"Each 1 percentage-point increase in {treatment['label']} {sign} scrap "
+                    f"probability by {magnitude:.2f} pp. Controlling for alloy grade and furnace."
+                )
+            else:
+                result["interpretation"] = (
+                    f"A 1-unit increase in {treatment['label']} ({unit}) {sign} scrap probability "
+                    f"by {magnitude:.1f} pp. Controlling for alloy grade and furnace."
+                )
 
     except Exception as exc:
         result["status"] = "error"
@@ -215,12 +260,16 @@ def reason_split_analysis(df: pd.DataFrame) -> list[dict]:
             if len(good) < 5 or len(scrap) < 5:
                 continue
             delta = float(scrap.mean() - good.mean())
+            base = float(good.mean())
+            delta_pct = round(delta / base * 100, 1) if abs(base) > 1e-9 else None
             row["signals"].append({
                 "treatment": tname,
                 "label": treatment["label"],
-                "avg_no_reason": round(float(good.mean()), 3),
+                "unit": treatment.get("unit", ""),
+                "avg_no_reason": round(base, 3),
                 "avg_with_reason": round(float(scrap.mean()), 3),
                 "delta": round(delta, 3),
+                "delta_pct": delta_pct,
             })
         row["signals"].sort(key=lambda x: abs(x["delta"]), reverse=True)
         results.append(row)
