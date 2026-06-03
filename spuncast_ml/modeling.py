@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import joblib
+import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.compose import ColumnTransformer
@@ -30,11 +31,45 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 import sklearn
 
+try:
+    from lightgbm import LGBMClassifier
+    import lightgbm as _lgbm_module
+    _LGBM_AVAILABLE = True
+except ImportError:
+    _LGBM_AVAILABLE = False
+
 from spuncast_ml.dataset import DEFAULT_FEATURE_SET, create_splits, load_latest_export
 from spuncast_ml.db import ensure_dir
 
 
 DEFAULT_DECISION_THRESHOLD = 0.5
+DEFAULT_FN_COST = 5.0
+DEFAULT_FP_COST = 1.0
+
+
+def find_cost_optimal_threshold(
+    y_valid: pd.Series,
+    valid_scores: pd.Series,
+    fn_cost: float = DEFAULT_FN_COST,
+    fp_cost: float = DEFAULT_FP_COST,
+) -> tuple[float, float]:
+    """Search validation set for the threshold that minimises FN*fn_cost + FP*fp_cost.
+
+    A missing scrap (false negative) is much costlier than an unnecessary hold
+    (false positive), so the default 5:1 ratio skews the threshold lower than 0.5.
+    Returns (best_threshold, best_cost).
+    """
+    thresholds = np.linspace(0.05, 0.95, 181)
+    best_t, best_cost = float(DEFAULT_DECISION_THRESHOLD), float("inf")
+    for t in thresholds:
+        preds = (valid_scores >= t).astype(int)
+        fn = int(((y_valid == 1) & (preds == 0)).sum())
+        fp = int(((y_valid == 0) & (preds == 1)).sum())
+        cost = fn * fn_cost + fp * fp_cost
+        if cost < best_cost:
+            best_cost = cost
+            best_t = float(t)
+    return best_t, best_cost
 
 
 def compute_file_sha256(path: Path) -> str:
@@ -161,6 +196,25 @@ def build_candidate_pipelines(x_train: pd.DataFrame, y_train: pd.Series) -> dict
             ]
         )
 
+    if _LGBM_AVAILABLE and calibration_folds >= 2:
+        candidates["lightgbm_balanced"] = Pipeline(
+            steps=[
+                ("preprocessor", build_preprocessor(x_train, dense_output=True)),
+                (
+                    "model",
+                    LGBMClassifier(
+                        n_estimators=500,
+                        learning_rate=0.05,
+                        num_leaves=31,
+                        min_child_samples=20,
+                        class_weight="balanced",
+                        random_state=42,
+                        verbose=-1,
+                    ),
+                ),
+            ]
+        )
+
     return candidates
 
 
@@ -182,7 +236,12 @@ def promotion_gate(model_metrics: dict[str, Any], baseline_metrics: dict[str, An
     }
 
 
-def train_model(feature_set: str = DEFAULT_FEATURE_SET, threshold: float = DEFAULT_DECISION_THRESHOLD) -> dict[str, Path]:
+def train_model(
+    feature_set: str = DEFAULT_FEATURE_SET,
+    threshold: float = DEFAULT_DECISION_THRESHOLD,
+    fn_cost: float = DEFAULT_FN_COST,
+    fp_cost: float = DEFAULT_FP_COST,
+) -> dict[str, Path]:
     frame, export_path, export_metadata = load_latest_export()
     split_paths = create_splits(frame, feature_set=feature_set)
 
@@ -222,30 +281,51 @@ def train_model(feature_set: str = DEFAULT_FEATURE_SET, threshold: float = DEFAU
     )
     best_pipeline = trained_pipelines[best_candidate_name]
 
+    # Optimise decision threshold on validation set using the cost ratio.
+    # A missed scrap (FN) costs fn_cost times more than an unnecessary hold (FP).
+    optimized_threshold = threshold
+    optimized_cost: float | None = None
+    if y_valid.nunique() >= 2:
+        best_valid_scores = pd.Series(best_pipeline.predict_proba(x_valid)[:, 1], index=x_valid.index)
+        optimized_threshold, optimized_cost = find_cost_optimal_threshold(
+            y_valid, best_valid_scores, fn_cost=fn_cost, fp_cost=fp_cost
+        )
+
     trained_at = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     model_path = model_dir() / f"scrap_baseline_{feature_set}_{trained_at}.joblib"
     metadata_path = model_dir() / f"scrap_baseline_{feature_set}_{trained_at}.json"
+
+    env: dict[str, Any] = {
+        "python_version": platform.python_version(),
+        "python_implementation": platform.python_implementation(),
+        "platform": platform.platform(),
+        "scikit_learn_version": sklearn.__version__,
+        "joblib_version": joblib.__version__,
+        "runtime_executable": sys.executable,
+    }
+    if _LGBM_AVAILABLE:
+        env["lightgbm_version"] = _lgbm_module.__version__
 
     metadata = {
         "trained_at_utc": trained_at,
         "source_export": str(export_path),
         "source_export_metadata": export_metadata,
         "feature_set": feature_set,
-        "decision_threshold": threshold,
+        "decision_threshold": optimized_threshold,
+        "decision_threshold_fallback": threshold,
+        "threshold_optimization": {
+            "fn_cost": fn_cost,
+            "fp_cost": fp_cost,
+            "optimized_threshold": optimized_threshold,
+            "optimized_validation_cost": optimized_cost,
+        },
         "selected_model": best_candidate_name,
         "candidate_models": candidate_results,
         "target_column": "scrap_flag",
         "rules_baseline_metrics": baseline_metrics,
         "promotion_gate": candidate_results[best_candidate_name]["promotion_gate"],
         "model_sha256": None,
-        "training_environment": {
-            "python_version": platform.python_version(),
-            "python_implementation": platform.python_implementation(),
-            "platform": platform.platform(),
-            "scikit_learn_version": sklearn.__version__,
-            "joblib_version": joblib.__version__,
-            "runtime_executable": sys.executable,
-        },
+        "training_environment": env,
     }
 
     joblib.dump(best_pipeline, model_path)

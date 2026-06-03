@@ -18,6 +18,8 @@ from spuncast_ml.dataset import (
     HIGH_CARDINALITY_TEXT_COLUMNS,
     IDENTIFIER_COLUMNS,
     TARGET_COLUMN,
+    add_cyclical_time_features,
+    add_rolling_features,
     load_latest_export,
 )
 from spuncast_ml.db import ensure_dir
@@ -70,6 +72,12 @@ def _load_latest_model_and_metadata(feature_set: str) -> tuple[Path, Pipeline, d
 def _prepare_inference_features(frame: pd.DataFrame, feature_set: str) -> pd.DataFrame:
     if feature_set not in FEATURE_SET_EXCLUSIONS:
         raise ValueError(f"Unsupported feature set: {feature_set}. Expected one of {sorted(FEATURE_SET_EXCLUSIONS)}")
+
+    # Add engineered features before dropping source columns.
+    # Rolling features resolve to NaN at inference time (no historical target
+    # available); the trained pipeline's median imputer fills them automatically.
+    frame = add_rolling_features(frame)
+    frame = add_cyclical_time_features(frame)
 
     excluded_columns = FEATURE_SET_EXCLUSIONS[feature_set]
     drop_columns = sorted(
