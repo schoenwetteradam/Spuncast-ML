@@ -167,6 +167,9 @@ def load_heats(hours: int = 24) -> tuple[pd.DataFrame, bool]:
     """
     result = _run_query(sql, (int(hours),))
     if result is not None and len(result) > 0:
+        # Drop the JSONB column — it serializes as mixed object types that
+        # PyArrow can't handle; explanations are fetched per-heat in detail view.
+        result = result.drop(columns=["explanation_json"], errors="ignore")
         return result, True
     return _demo_heats(), False
 
@@ -223,7 +226,12 @@ def render_sidebar() -> tuple[int, bool]:
     st.sidebar.caption("Scrap Prediction Dashboard")
     st.sidebar.divider()
 
-    hours = st.sidebar.selectbox("Show heats from last…", [8, 24, 48, 72], index=1, format_func=lambda h: f"{h} hours")
+    hours = st.sidebar.selectbox(
+        "Show heats from last…",
+        [24, 48, 72, 168, 336, 720],
+        index=3,
+        format_func=lambda h: f"{h//24} days" if h >= 48 else f"{h} hours",
+    )
     auto_refresh = st.sidebar.toggle("Auto-refresh (30 s)", value=False)
 
     st.sidebar.divider()
@@ -277,7 +285,7 @@ def render_heat_board(heats: pd.DataFrame, is_live: bool) -> None:
         .rename(columns={"heat_number": "Heat #"})
         .style.apply(_style_row, axis=1)
     )
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.dataframe(styled, width="stretch", hide_index=True)
 
     # Download button
     csv = heats.to_csv(index=False).encode("utf-8")
@@ -345,7 +353,7 @@ def render_heat_detail(heats: pd.DataFrame, is_live: bool) -> None:
             title=f"Top factors for Heat {selected}",
         )
         fig.update_layout(showlegend=False, height=400, yaxis={"autorange": "reversed"})
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
         st.caption("Red bars increase scrap probability. Green bars reduce it.")
     else:
         st.info("SHAP explanations not available. Set SCORE_ENABLE_SHAP=1 in the daemon environment to enable them.")
@@ -419,17 +427,20 @@ def render_model_performance() -> None:
     cm = test.get("confusion_matrix")
     if cm:
         cm_df = pd.DataFrame(cm, index=["Actual: No Scrap", "Actual: Scrap"], columns=["Predicted: No Scrap", "Predicted: Scrap"])
-        st.dataframe(cm_df.style.background_gradient(cmap="Reds"), use_container_width=False)
+        st.dataframe(cm_df.style.background_gradient(cmap="Reds"), width="content")
 
     st.divider()
     st.subheader("Metadata")
     info_cols = {
-        "Feature Set": metrics.get("feature_set"),
-        "Decision Threshold": metrics.get("decision_threshold"),
-        "Evaluated At": metrics.get("evaluated_at_utc"),
+        "Feature Set": str(metrics.get("feature_set") or "—"),
+        "Decision Threshold": str(metrics.get("decision_threshold") or "—"),
+        "Evaluated At": str(metrics.get("evaluated_at_utc") or "—"),
         "Model Path": Path(metrics.get("model_path", "")).name if metrics.get("model_path") else "—",
     }
-    st.table(pd.DataFrame.from_dict(info_cols, orient="index", columns=["Value"]))
+    st.dataframe(
+        pd.DataFrame.from_dict(info_cols, orient="index", columns=["Value"]),
+        width="content",
+    )
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
