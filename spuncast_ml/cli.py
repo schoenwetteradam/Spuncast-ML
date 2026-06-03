@@ -10,7 +10,7 @@ from spuncast_ml.modeling import DEFAULT_FN_COST, DEFAULT_FP_COST, evaluate_late
 from spuncast_ml.monitoring import generate_drift_report
 from spuncast_ml.promotion import promote_or_revert
 from spuncast_ml.recommendations_archive import archive_recommendations
-from spuncast_ml.reporting import generate_weekly_report
+from spuncast_ml.reporting import generate_heat_report, generate_weekly_report
 
 
 def command_export() -> None:
@@ -62,6 +62,11 @@ def command_promote(feature_set: str, min_relative_improvement: float, dry_run: 
 
 def command_weekly_report(output_path: str) -> None:
     path = generate_weekly_report(output_path)
+    print(json.dumps({"report_path": str(path)}, indent=2))
+
+
+def command_heat_report(heat_number: str, output_path: str | None) -> None:
+    path = generate_heat_report(heat_number, output_path)
     print(json.dumps({"report_path": str(path)}, indent=2))
 
 
@@ -137,6 +142,10 @@ def build_parser() -> argparse.ArgumentParser:
     promote_parser.add_argument("--min-relative-improvement", type=float, default=0.05)
     promote_parser.add_argument("--dry-run", action="store_true")
 
+    heat_report_parser = subparsers.add_parser("heat-report", help="Generate a per-heat HTML report card from the operations DB")
+    heat_report_parser.add_argument("--heat-number", required=True, help="Heat number to report on (e.g. H-12345)")
+    heat_report_parser.add_argument("--output-path", help="Optional path for the HTML file. Defaults to reports/generated/heat_report_<id>.html")
+
     weekly_report_parser = subparsers.add_parser("weekly-report", help="Emit an HTML summary from the latest evaluation and model metadata")
     weekly_report_parser.add_argument(
         "--output-path",
@@ -196,6 +205,8 @@ def main() -> None:
             min_relative_improvement=args.min_relative_improvement,
             dry_run=args.dry_run,
         )
+    elif args.command == "heat-report":
+        command_heat_report(heat_number=args.heat_number, output_path=args.output_path)
     elif args.command == "weekly-report":
         command_weekly_report(output_path=args.output_path)
     elif args.command == "archive-recommendations":

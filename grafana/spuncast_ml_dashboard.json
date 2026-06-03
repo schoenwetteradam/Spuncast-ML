@@ -1,0 +1,183 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_SPUNCAST_OPERATIONS",
+      "label": "Spuncast Operations DB",
+      "description": "PostgreSQL datasource pointed at the Spuncast operations database",
+      "type": "datasource",
+      "pluginId": "postgres",
+      "pluginName": "PostgreSQL"
+    }
+  ],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "9.0.0" },
+    { "type": "datasource", "id": "postgres", "name": "PostgreSQL", "version": "1.0.0" },
+    { "type": "panel", "id": "table", "name": "Table", "version": "" },
+    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" },
+    { "type": "panel", "id": "stat", "name": "Stat", "version": "" },
+    { "type": "panel", "id": "barchart", "name": "Bar chart", "version": "" }
+  ],
+  "annotations": { "list": [] },
+  "description": "Spuncast ML — scrap prediction scores, remelt candidates, model performance, and operator response rate",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Live Heat Scores",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_SPUNCAST_OPERATIONS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "displayMode": "color-background-solid", "filterable": true },
+          "mappings": [
+            { "options": { "hold_for_operator_review": { "color": "red",    "text": "🔴 HOLD"    } }, "type": "value" },
+            { "options": { "increase_monitoring":      { "color": "orange", "text": "🟡 MONITOR" } }, "type": "value" },
+            { "options": { "continue_standard_run":    { "color": "green",  "text": "🟢 CLEAR"   } }, "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "scrap_probability" },
+            "properties": [
+              { "id": "unit", "value": "percentunit" },
+              { "id": "custom.displayMode", "value": "color-background" },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 0.5 },
+                  { "color": "red", "value": 0.8 }
+              ]}}
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 1 },
+      "id": 1,
+      "options": { "footer": { "show": false }, "showHeader": true, "sortBy": [{ "desc": true, "displayName": "scrap_probability" }] },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_SPUNCAST_OPERATIONS}" },
+          "format": "table",
+          "rawSql": "SELECT\n    s.heat_number,\n    s.scrap_probability,\n    s.recommended_action,\n    s.model_version,\n    s.scored_at,\n    r.decision_code,\n    r.primary_driver\nFROM ml_heat_scores s\nLEFT JOIN heat_recommendations r ON r.heat_number = s.heat_number\nWHERE s.scored_at >= NOW() - INTERVAL '48 hours'\nORDER BY s.scored_at DESC\nLIMIT 200;",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Heat Predictions (48 h)",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_SPUNCAST_OPERATIONS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "filterable": true },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.65 }] },
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 11 },
+      "id": 2,
+      "options": { "footer": { "show": false }, "showHeader": true },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_SPUNCAST_OPERATIONS}" },
+          "format": "table",
+          "rawSql": "SELECT\n    s.heat_number,\n    s.scrap_probability,\n    s.recommended_action,\n    r.recommendation_text,\n    r.primary_driver,\n    s.scored_at\nFROM ml_heat_scores s\nLEFT JOIN heat_recommendations r\n    ON r.heat_number = s.heat_number\nWHERE s.scrap_probability >= 0.65\n  AND s.operator_action IS NULL\n  AND s.scored_at >= NOW() - INTERVAL '8 hours'\nORDER BY s.scrap_probability DESC;",
+          "refId": "A"
+        }
+      ],
+      "title": "Re-melt Candidates — Unactioned (8 h)",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_SPUNCAST_OPERATIONS}" },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit" },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "response_pct" }, "properties": [{ "id": "unit", "value": "percent" }] }
+        ]
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 11 },
+      "id": 3,
+      "options": { "footer": { "show": false }, "showHeader": true },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_SPUNCAST_OPERATIONS}" },
+          "format": "table",
+          "rawSql": "SELECT\n    s.recommended_action,\n    COUNT(*) AS total,\n    COUNT(s.operator_action) AS acted,\n    COUNT(*) - COUNT(s.operator_action) AS pending,\n    ROUND(COUNT(s.operator_action)::numeric / NULLIF(COUNT(*), 0) * 100, 1) AS response_pct\nFROM ml_heat_scores s\nWHERE s.scored_at >= NOW() - INTERVAL '7 days'\nGROUP BY s.recommended_action\nORDER BY s.recommended_action;",
+          "refId": "A"
+        }
+      ],
+      "title": "Operator Response Rate (7 days)",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "id": 101,
+      "title": "Score History & Model Performance",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_SPUNCAST_OPERATIONS}" },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "min": 0, "max": 1,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 0.5 },
+            { "color": "red", "value": 0.8 }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 19 },
+      "id": 4,
+      "options": { "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_SPUNCAST_OPERATIONS}" },
+          "format": "time_series",
+          "rawSql": "SELECT\n    s.scored_at AS \"time\",\n    s.scrap_probability,\n    s.recommended_action,\n    s.operator_action\nFROM ml_heat_scores s\nWHERE s.scored_at >= NOW() - INTERVAL '24 hours'\nORDER BY s.scored_at;",
+          "refId": "A",
+          "timeColumn": "time"
+        }
+      ],
+      "title": "Scrap Probability — Score History (24 h)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_SPUNCAST_OPERATIONS}" },
+      "fieldConfig": { "defaults": { "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } } },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 27 },
+      "id": 5,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_SPUNCAST_OPERATIONS}" },
+          "format": "table",
+          "rawSql": "WITH labeled AS (\n    SELECT predicted_flag, actual_scrap_flag\n    FROM ml_heat_scores\n    WHERE actual_scrap_flag IS NOT NULL\n      AND scored_at >= NOW() - INTERVAL '90 days'\n)\nSELECT\n    COUNT(*) FILTER (WHERE predicted_flag = 1 AND actual_scrap_flag = 1) AS true_positive,\n    COUNT(*) FILTER (WHERE predicted_flag = 1 AND actual_scrap_flag = 0) AS false_positive,\n    COUNT(*) FILTER (WHERE predicted_flag = 0 AND actual_scrap_flag = 1) AS false_negative,\n    COUNT(*) FILTER (WHERE predicted_flag = 0 AND actual_scrap_flag = 0) AS true_negative,\n    COUNT(*) AS labeled_rows,\n    CASE WHEN COUNT(*) > 0\n         THEN (\n             COUNT(*) FILTER (WHERE predicted_flag = actual_scrap_flag)::double precision\n             / COUNT(*)::double precision\n         )\n    END AS accuracy\nFROM labeled;",
+          "refId": "A"
+        }
+      ],
+      "title": "Model Performance — Labeled Outcomes (90 days)",
+      "type": "stat"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 38,
+  "tags": ["spuncast", "ml", "scrap"],
+  "templating": { "list": [] },
+  "time": { "from": "now-24h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Spuncast ML — Scrap Prediction",
+  "uid": "spuncast-ml-v1",
+  "version": 1
+}
