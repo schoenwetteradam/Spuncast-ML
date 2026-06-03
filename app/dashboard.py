@@ -76,7 +76,9 @@ def _run_query(sql: str, params: tuple = ()) -> pd.DataFrame | None:
             warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy.*")
             result = pd.read_sql_query(sql, conn, params=params if params else None)
         return result
-    except Exception:
+    except Exception as exc:
+        import sys
+        print(f"[dashboard] query error: {exc}", file=sys.stderr)
         return None
     finally:
         conn.close()
@@ -156,7 +158,6 @@ def load_heats(hours: int = 24) -> tuple[pd.DataFrame, bool]:
             s.recommended_action,
             s.scored_at,
             s.operator_action,
-            s.explanation_json,
             r.decision_code,
             r.primary_driver
         FROM ml_heat_scores s
@@ -167,9 +168,6 @@ def load_heats(hours: int = 24) -> tuple[pd.DataFrame, bool]:
     """
     result = _run_query(sql, (int(hours),))
     if result is not None and len(result) > 0:
-        # Drop the JSONB column — it serializes as mixed object types that
-        # PyArrow can't handle; explanations are fetched per-heat in detail view.
-        result = result.drop(columns=["explanation_json"], errors="ignore")
         return result, True
     return _demo_heats(), False
 
