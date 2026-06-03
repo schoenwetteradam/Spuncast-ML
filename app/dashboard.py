@@ -51,38 +51,39 @@ REPORT_DIR = Path(os.environ.get("SPUNCAST_ML_REPORT_DIR", "./reports/generated"
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
-@st.cache_resource(ttl=30)
-def _db_conn():
-    """Return a live psycopg2 connection or None on failure."""
+def _db_connect():
+    """Open a fresh psycopg2 connection using env vars. Returns None on failure."""
     try:
         import psycopg2
-        conn = psycopg2.connect(
+        return psycopg2.connect(
             dbname=os.environ.get("PGDATABASE", "spuncast"),
             user=os.environ.get("PGUSER", "postgres"),
             password=os.environ.get("PGPASSWORD"),
             host=os.environ.get("PGHOST", os.environ.get("PG_HOST", "localhost")),
             port=int(os.environ.get("PG_PORT", 5432)),
         )
-        return conn
     except Exception:
         return None
 
 
 def _run_query(sql: str, params: tuple = ()) -> pd.DataFrame | None:
-    conn = _db_conn()
+    conn = _db_connect()
     if conn is None:
         return None
     try:
         import warnings
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy.*")
-            return pd.read_sql_query(sql, conn, params=params)
+            result = pd.read_sql_query(sql, conn, params=params if params else None)
+        return result
     except Exception:
         return None
+    finally:
+        conn.close()
 
 
 def _write_operator_action(heat_number: str, action: str) -> bool:
-    conn = _db_conn()
+    conn = _db_connect()
     if conn is None:
         return False
     try:
@@ -96,6 +97,8 @@ def _write_operator_action(heat_number: str, action: str) -> bool:
     except Exception:
         conn.rollback()
         return False
+    finally:
+        conn.close()
 
 
 # ── demo data ─────────────────────────────────────────────────────────────────
@@ -144,6 +147,8 @@ def _demo_explanation(heat_number: str) -> dict[str, float]:
 
 def load_heats(hours: int = 24) -> tuple[pd.DataFrame, bool]:
     """Return (heats_df, is_live). Falls back to demo data if DB unavailable."""
+    # Use make_interval so the integer parameter binds cleanly without
+    # string-interpolating inside an INTERVAL literal (which psycopg2 rejects).
     sql = """
         SELECT
             s.heat_number,
@@ -156,11 +161,11 @@ def load_heats(hours: int = 24) -> tuple[pd.DataFrame, bool]:
             r.primary_driver
         FROM ml_heat_scores s
         LEFT JOIN heat_recommendations r ON r.heat_number = s.heat_number
-        WHERE s.scored_at >= NOW() - INTERVAL '%s hours'
+        WHERE s.scored_at >= NOW() - make_interval(hours => %s)
         ORDER BY s.scored_at DESC
         LIMIT 500
     """
-    result = _run_query(sql, (hours,))
+    result = _run_query(sql, (int(hours),))
     if result is not None and len(result) > 0:
         return result, True
     return _demo_heats(), False
