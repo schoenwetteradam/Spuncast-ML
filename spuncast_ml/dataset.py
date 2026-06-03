@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from spuncast_ml.contract import DEFAULT_CONTRACT_VERSION, load_contract, validate_contract_columns
@@ -240,6 +241,75 @@ def _normalize_dates(frame: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
+ROLLING_FEATURE_COLUMNS = ("operator_rolling_scrap_rate", "shift_rolling_scrap_rate", "die_rolling_scrap_rate")
+CYCLICAL_FEATURE_COLUMNS = ("hour_sin", "hour_cos", "dow_sin", "dow_cos")
+
+
+def add_rolling_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """Rolling historical scrap rate per operator, shift, and die.
+
+    Requires the frame to already be sorted chronologically. Uses shift(1)
+    so the current heat's outcome never leaks into its own features.
+    When TARGET_COLUMN is absent (live inference), NaN placeholders are added
+    so the trained pipeline's imputer can fill them with the training median.
+    """
+    out = frame.copy()
+    has_target = TARGET_COLUMN in frame.columns and frame[TARGET_COLUMN].notna().any()
+
+    if has_target and "melter" in frame.columns:
+        out["operator_rolling_scrap_rate"] = (
+            frame.groupby("melter", sort=False)[TARGET_COLUMN]
+            .transform(lambda s: s.shift(1).rolling(10, min_periods=1).mean())
+            .fillna(0.5)
+        )
+    else:
+        out["operator_rolling_scrap_rate"] = np.nan
+
+    if has_target and "shift" in frame.columns:
+        out["shift_rolling_scrap_rate"] = (
+            frame.groupby("shift", sort=False)[TARGET_COLUMN]
+            .transform(lambda s: s.shift(1).rolling(5, min_periods=1).mean())
+            .fillna(0.5)
+        )
+    else:
+        out["shift_rolling_scrap_rate"] = np.nan
+
+    if has_target and "die_no" in frame.columns:
+        out["die_rolling_scrap_rate"] = (
+            frame.groupby("die_no", sort=False)[TARGET_COLUMN]
+            .transform(lambda s: s.shift(1).rolling(20, min_periods=1).mean())
+            .fillna(0.5)
+        )
+    else:
+        out["die_rolling_scrap_rate"] = np.nan
+
+    return out
+
+
+def add_cyclical_time_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """Encode pour/heat-start time as hour-of-day and day-of-week sin/cos pairs.
+
+    Raw Unix seconds destroy cyclical patterns (e.g. midnight ≈ noon distance
+    should be 12 h in both directions). Sin/cos encoding preserves this.
+    """
+    out = frame.copy()
+    ts_col = next((c for c in ("heat_start_ts", "pour_date") if c in frame.columns), None)
+    if ts_col is None:
+        for col in CYCLICAL_FEATURE_COLUMNS:
+            out[col] = np.nan
+        return out
+
+    ts = pd.to_datetime(frame[ts_col], errors="coerce", utc=True)
+    hour = ts.dt.hour.where(ts.notna(), other=12).astype(float)
+    dow = ts.dt.dayofweek.where(ts.notna(), other=2).astype(float)
+
+    out["hour_sin"] = np.sin(2 * np.pi * hour / 24)
+    out["hour_cos"] = np.cos(2 * np.pi * hour / 24)
+    out["dow_sin"] = np.sin(2 * np.pi * dow / 7)
+    out["dow_cos"] = np.cos(2 * np.pi * dow / 7)
+    return out
+
+
 def build_feature_frame(frame: pd.DataFrame, feature_set: str = DEFAULT_FEATURE_SET) -> tuple[pd.DataFrame, pd.Series]:
     if feature_set not in FEATURE_SET_EXCLUSIONS:
         raise ValueError(f"Unsupported feature set: {feature_set}. Expected one of {sorted(FEATURE_SET_EXCLUSIONS)}")
@@ -247,6 +317,9 @@ def build_feature_frame(frame: pd.DataFrame, feature_set: str = DEFAULT_FEATURE_
     missing = {TARGET_COLUMN} - set(frame.columns)
     if missing:
         raise KeyError(f"Required target column missing from dataset: {sorted(missing)}")
+
+    frame = add_rolling_features(frame)
+    frame = add_cyclical_time_features(frame)
 
     y = frame[TARGET_COLUMN].astype(int)
 
