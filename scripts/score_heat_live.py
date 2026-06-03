@@ -95,11 +95,100 @@ def _tier_color(decision_code: str) -> str:
     return {"HOLD": "FF0000", "CAUTION": "FFA500", "ADVISORY": "0078D4"}.get(decision_code, "808080")
 
 
+# Human-readable labels for the most common signal columns.
+_FEATURE_LABELS: dict[str, str] = {
+    "tap_deviation_from_fps_pct":       "Tap temp {v:+.1f}% vs FPS spec",
+    "pour_deviation_from_fps_pct":      "Pour temp {v:+.1f}% vs FPS spec",
+    "die_deviation_from_fps_pct":       "Die temp {v:+.1f}% vs FPS spec",
+    "rpm_deviation_from_fps_pct":       "Die RPM {v:+.1f}% vs FPS spec",
+    "spin_time_deviation_from_fps_pct": "Spin time {v:+.1f}% vs FPS spec",
+    "pour_time_deviation_from_fps_pct": "Pour time {v:+.1f}% vs FPS spec",
+    "funnel_deviation_from_fps_pct":    "Funnel size {v:+.1f}% vs FPS spec",
+    "tap_deviation_from_instruction_pct":  "Tap temp {v:+.1f}% vs instruction",
+    "pour_deviation_from_instruction_pct": "Pour temp {v:+.1f}% vs instruction",
+    "die_deviation_from_instruction_pct":  "Die temp {v:+.1f}% vs instruction",
+    "rpm_deviation_from_instruction_pct":  "Die RPM {v:+.1f}% vs instruction",
+    "operator_rolling_scrap_rate":      "Operator scrap rate: {pct:.0%} last 10 heats",
+    "shift_rolling_scrap_rate":         "Shift scrap rate: {pct:.0%} last 5 heats",
+    "die_rolling_scrap_rate":           "Die scrap rate: {pct:.0%} last 20 heats",
+    "chem_not_ok_flag":                 "Chemistry check failed",
+    "has_any_chem_alert":               "Chemistry alert present",
+    "charge_scrap_pct":                 "Charge: {pct:.0%} scrap material",
+    "wrong_funnel_flag":                "Wrong funnel size used",
+    "has_open_data_quality_violation":  "Open data quality violation",
+    "tap_temp_missing":                 "Tap temperature not recorded",
+    "pour_temp_missing":                "Pour temperature not recorded",
+    "die_temp_missing":                 "Die temperature not recorded",
+}
+
+
+def _reason_text(feature: str, raw_value: float | None) -> str:
+    """Convert a feature name + raw value into a one-line human-readable reason."""
+    template = _FEATURE_LABELS.get(feature)
+    if template is None:
+        return feature.replace("_", " ")
+    try:
+        if raw_value is not None and not math.isnan(raw_value):
+            return template.format(v=raw_value, pct=raw_value)
+    except (ValueError, KeyError):
+        pass
+    return template.split("{")[0].strip().rstrip(",")
+
+
+def _build_reason_bullets(
+    top_features: dict[str, float] | None,
+    raw_row: "pd.Series | None",
+    max_bullets: int = 3,
+) -> list[str]:
+    """Return up to max_bullets human-readable reason strings.
+
+    Uses SHAP ranking when available; otherwise falls back to deviation columns
+    sorted by absolute value.
+    """
+    bullets: list[str] = []
+
+    if top_features:
+        for feat, shap_val in list(top_features.items())[:max_bullets]:
+            if shap_val <= 0:
+                continue  # only surface risk-increasing factors
+            raw_val: float | None = None
+            if raw_row is not None:
+                try:
+                    raw_val = float(raw_row.get(feat))  # type: ignore[arg-type]
+                    if math.isnan(raw_val):
+                        raw_val = None
+                except (TypeError, ValueError):
+                    raw_val = None
+            bullets.append(_reason_text(feat, raw_val))
+
+    # If SHAP gave no positive contributors, fall back to high-deviation signals
+    if not bullets and raw_row is not None:
+        deviation_cols = [c for c in _FEATURE_LABELS if "deviation" in c or "rolling" in c or "flag" in c]
+        ranked: list[tuple[float, str]] = []
+        for col in deviation_cols:
+            try:
+                v = float(raw_row.get(col, 0) or 0)
+                if not math.isnan(v) and abs(v) > 0:
+                    ranked.append((abs(v), col))
+            except (TypeError, ValueError):
+                continue
+        for _, col in sorted(ranked, reverse=True)[:max_bullets]:
+            try:
+                raw_val = float(raw_row.get(col))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                raw_val = None
+            bullets.append(_reason_text(col, raw_val))
+
+    return bullets[:max_bullets]
+
+
 def send_teams_notification(
     heat_number: str,
     probability: float,
     decision_code: str,
     primary_driver: str | None,
+    top_features: "dict[str, float] | None" = None,
+    raw_row: "pd.Series | None" = None,
     dry_run: bool = False,
 ) -> None:
     if not TEAMS_WEBHOOK_URL:
@@ -108,46 +197,59 @@ def send_teams_notification(
         return
     pct = f"{probability * 100:.1f}%"
     tier_labels = {
-        "HOLD": "🔴 HOLD — Re-melt candidate",
-        "CAUTION": "🟠 CAUTION — Elevated risk",
+        "HOLD":     "🔴 HOLD — Re-melt candidate",
+        "CAUTION":  "🟠 CAUTION — Elevated risk",
         "ADVISORY": "🔵 ADVISORY — Monitor closely",
     }
     tier_styles = {"HOLD": "attention", "CAUTION": "warning", "ADVISORY": "accent"}
-    facts = [
-        {"title": "Heat Number", "value": heat_number},
-        {"title": "Scrap Probability", "value": pct},
-        {"title": "Decision", "value": tier_labels.get(decision_code, decision_code)},
+
+    bullets = _build_reason_bullets(top_features, raw_row)
+    headline = f"Heat **{heat_number}** — {tier_labels.get(decision_code, decision_code)} ({pct} scrap risk)"
+
+    body_items: list[dict] = [
+        {
+            "type": "Container",
+            "style": tier_styles.get(decision_code, "default"),
+            "items": [
+                {
+                    "type": "TextBlock",
+                    "text": headline,
+                    "weight": "Bolder",
+                    "size": "Medium",
+                    "wrap": True,
+                },
+                {
+                    "type": "TextBlock",
+                    "text": "Early Remelt Decision Model · Spuncast",
+                    "isSubtle": True,
+                    "spacing": "None",
+                    "wrap": True,
+                },
+            ],
+        },
     ]
-    if primary_driver:
-        facts.append({"title": "Top Signal", "value": primary_driver.replace("_", " ")})
+
+    if bullets:
+        reason_text = "\n".join(f"• {b}" for b in bullets)
+        body_items.append({
+            "type": "TextBlock",
+            "text": "**Top reasons:**\n" + reason_text,
+            "wrap": True,
+            "spacing": "Medium",
+        })
+    else:
+        # Fallback: at least show the primary driver
+        if primary_driver:
+            body_items.append({
+                "type": "FactSet",
+                "facts": [{"title": "Top signal", "value": primary_driver.replace("_", " ")}],
+            })
 
     adaptive_card = {
         "type": "AdaptiveCard",
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
         "version": "1.4",
-        "body": [
-            {
-                "type": "Container",
-                "style": tier_styles.get(decision_code, "default"),
-                "items": [
-                    {
-                        "type": "TextBlock",
-                        "text": f"ML Score: Heat **{heat_number}**",
-                        "weight": "Bolder",
-                        "size": "Medium",
-                        "wrap": True,
-                    },
-                    {
-                        "type": "TextBlock",
-                        "text": "Early Remelt Decision Model · Spuncast",
-                        "isSubtle": True,
-                        "spacing": "None",
-                        "wrap": True,
-                    },
-                ],
-            },
-            {"type": "FactSet", "facts": facts},
-        ],
+        "body": body_items,
         "msteams": {"width": "Full"},
     }
     payload = {
@@ -406,11 +508,16 @@ def write_scores(
             raw_row = raw_frame.loc[idx] if idx in raw_frame.index else row
             driver = _top_contributing_feature(raw_row, feature_columns)
             tier = decision_code_for_probability(probability)
+            tops = shap_payload.get("top_features") if isinstance(shap_payload, dict) else None
             if probability >= insert_min:
-                tops = shap_payload.get("top_features") if isinstance(shap_payload, dict) else None
                 note = _format_shap_note(tops) if isinstance(tops, dict) else None
                 upsert_heat_recommendation(cur, row["heat_number"], probability, tier, driver, note)
-            send_teams_notification(row["heat_number"], probability, tier, driver, dry_run=dry_run)
+            send_teams_notification(
+                row["heat_number"], probability, tier, driver,
+                top_features=tops,
+                raw_row=raw_row,
+                dry_run=dry_run,
+            )
     conn.commit()
 
 
