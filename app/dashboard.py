@@ -226,7 +226,12 @@ def render_sidebar() -> tuple[int, bool]:
     st.sidebar.caption("Scrap Prediction Dashboard")
     st.sidebar.divider()
 
-    hours = st.sidebar.selectbox("Show heats from last…", [8, 24, 48, 72], index=1, format_func=lambda h: f"{h} hours")
+    hours = st.sidebar.selectbox(
+        "Show heats from last…",
+        [24, 48, 72, 168, 336, 720],
+        index=3,
+        format_func=lambda h: f"{h//24} days" if h >= 48 else f"{h} hours",
+    )
     auto_refresh = st.sidebar.toggle("Auto-refresh (30 s)", value=False)
 
     st.sidebar.divider()
