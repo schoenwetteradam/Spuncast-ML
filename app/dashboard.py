@@ -246,7 +246,7 @@ def render_sidebar() -> tuple[int, bool]:
         st.sidebar.info("No evaluation report found.\nRun `spuncast-ml evaluate` first.")
 
     st.sidebar.divider()
-    st.sidebar.caption("© Spuncast Industries")
+    st.sidebar.caption("© Spuncast Inc.")
     return int(hours), bool(auto_refresh)
 
 
