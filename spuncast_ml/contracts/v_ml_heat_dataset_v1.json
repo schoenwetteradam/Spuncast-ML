@@ -35,8 +35,6 @@
     "die_rpm",
     "spin_time_min",
     "pour_time_sec",
-    "funnel_size_in",
-    "funnel_size_missing",
     "pour_heat_status",
     "pour_rpm_status",
     "tap_pct_of_band",
@@ -100,7 +98,9 @@
     "latest_decision_code",
     "latest_risk_score",
     "instruction_source",
-    "wrong_funnel_flag",
-    "charge_scrap_pct"
+    "tap_deviation_from_instruction_pct",
+    "pour_deviation_from_instruction_pct",
+    "die_deviation_from_instruction_pct",
+    "rpm_deviation_from_instruction_pct"
   ]
 }
