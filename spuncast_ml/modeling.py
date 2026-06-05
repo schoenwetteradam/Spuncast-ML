@@ -218,21 +218,31 @@ def build_candidate_pipelines(x_train: pd.DataFrame, y_train: pd.Series) -> dict
     return candidates
 
 
-def promotion_gate(model_metrics: dict[str, Any], baseline_metrics: dict[str, Any]) -> dict[str, Any]:
+def promotion_gate(
+    model_metrics: dict[str, Any],
+    baseline_metrics: dict[str, Any],
+    fn_cost: float = DEFAULT_FN_COST,
+    fp_cost: float = DEFAULT_FP_COST,
+) -> dict[str, Any]:
+    model_cost = model_metrics["false_negatives"] * fn_cost + model_metrics["false_positives"] * fp_cost
+    baseline_cost = baseline_metrics["false_negatives"] * fn_cost + baseline_metrics["false_positives"] * fp_cost
     passes = (
-        model_metrics["recall"] >= baseline_metrics["recall"]
-        and model_metrics["false_negatives"] <= baseline_metrics["false_negatives"]
+        model_cost <= baseline_cost
         and model_metrics.get("pr_auc", 0.0) >= baseline_metrics.get("pr_auc", 0.0)
     )
     return {
-        "baseline_recall": baseline_metrics["recall"],
-        "model_recall": model_metrics["recall"],
+        "baseline_weighted_cost": baseline_cost,
+        "model_weighted_cost": model_cost,
+        "fn_cost": fn_cost,
+        "fp_cost": fp_cost,
         "baseline_false_negatives": baseline_metrics["false_negatives"],
         "model_false_negatives": model_metrics["false_negatives"],
+        "baseline_false_positives": baseline_metrics["false_positives"],
+        "model_false_positives": model_metrics["false_positives"],
         "baseline_pr_auc": baseline_metrics.get("pr_auc"),
         "model_pr_auc": model_metrics.get("pr_auc"),
         "passes": passes,
-        "rule": "Model must match or beat rules baseline on recall, not increase false negatives, and match or improve PR-AUC before promotion.",
+        "rule": f"Model must have lower weighted cost (FN×{fn_cost}+FP×{fp_cost}) than rules baseline and equal or better PR-AUC.",
     }
 
 
@@ -267,18 +277,16 @@ def train_model(
         metrics = collect_metrics(y_valid, validation_predictions, validation_scores)
         candidate_results[candidate_name] = {
             "validation_metrics": metrics,
-            "promotion_gate": promotion_gate(metrics, baseline_metrics),
+            "promotion_gate": promotion_gate(metrics, baseline_metrics, fn_cost=fn_cost, fp_cost=fp_cost),
         }
         trained_pipelines[candidate_name] = pipeline
 
-    best_candidate_name = max(
-        candidate_results,
-        key=lambda name: (
-            candidate_results[name]["validation_metrics"]["recall"],
-            -candidate_results[name]["validation_metrics"]["false_negatives"],
-            candidate_results[name]["validation_metrics"].get("pr_auc", 0.0),
-        ),
-    )
+    def _candidate_sort_key(name: str) -> tuple[float, float]:
+        m = candidate_results[name]["validation_metrics"]
+        cost = m["false_negatives"] * fn_cost + m["false_positives"] * fp_cost
+        return (-cost, m.get("pr_auc", 0.0))
+
+    best_candidate_name = max(candidate_results, key=_candidate_sort_key)
     best_pipeline = trained_pipelines[best_candidate_name]
 
     # Optimise decision threshold on validation set using the cost ratio.
@@ -348,6 +356,14 @@ def evaluate_latest_model(feature_set: str = DEFAULT_FEATURE_SET, threshold: flo
     latest_model = model_candidates[-1]
     pipeline: Pipeline = joblib.load(latest_model)
 
+    # Use the cost-optimal threshold stored in the model metadata when the
+    # caller passed the default, so evaluate always reflects real operational use.
+    if threshold == DEFAULT_DECISION_THRESHOLD:
+        meta_path = latest_model.with_suffix(".json")
+        if meta_path.exists():
+            stored_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            threshold = float(stored_meta.get("decision_threshold", threshold))
+
     x_test = pd.read_parquet(split_paths["x_test"])
     y_test = pd.read_parquet(split_paths["y_test"])["scrap_flag"]
 
@@ -367,7 +383,7 @@ def evaluate_latest_model(feature_set: str = DEFAULT_FEATURE_SET, threshold: flo
         "model_path": str(latest_model),
         "test_metrics": model_metrics,
         "rules_baseline_test_metrics": baseline_metrics,
-        "promotion_gate": promotion_gate(model_metrics, baseline_metrics),
+        "promotion_gate": promotion_gate(model_metrics, baseline_metrics),  # fn/fp costs not available in evaluate; defaults apply
     }
 
     output_path = report_dir() / f"evaluation_{feature_set}_{evaluation['evaluated_at_utc']}.json"
