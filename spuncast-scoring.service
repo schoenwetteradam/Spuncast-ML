@@ -1,0 +1,17 @@
+[Unit]
+Description=Spuncast ML Scoring Daemon
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=aschoenwetter
+WorkingDirectory=/opt/Spuncast-Operations/Spuncast-ML
+EnvironmentFile=/opt/Spuncast-Operations/Spuncast-ML/.env
+ExecStart=/opt/Spuncast-Operations/Spuncast-ML/venv/bin/python scripts/score_heat_live.py
+Restart=always
+RestartSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
