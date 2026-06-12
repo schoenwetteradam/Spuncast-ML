@@ -1,21 +1,4 @@
--- Persistent scoring table written by the live scoring daemon.
--- Deployed in the Spuncast-Operations database alongside pour_logs.
-
-CREATE TABLE IF NOT EXISTS ml_heat_scores (
-    id                BIGSERIAL    PRIMARY KEY,
-    heat_number       TEXT         NOT NULL UNIQUE,
-    scrap_probability FLOAT        NOT NULL,
-    predicted_flag    INTEGER      NOT NULL,
-    recommended_action TEXT,
-    feature_set       TEXT         NOT NULL DEFAULT 'early_remelt_decision',
-    model_version     TEXT,
-    scored_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    operator_action   TEXT,        -- 'remelt' | 'proceed' | NULL
-    actual_scrap_flag INTEGER      -- filled in after outcome known
-);
-
-CREATE INDEX IF NOT EXISTS idx_mhs_heat
-    ON ml_heat_scores (heat_number);
-
-CREATE INDEX IF NOT EXISTS idx_mhs_scored_at
-    ON ml_heat_scores (scored_at DESC);
+-- ml_heat_scores DDL is owned by Operations (db/init/122_ml_heat_scores_contract.sql).
+-- Do not define this table in the ML repo; it is guaranteed to exist after
+-- ./scripts/apply_db_init.sh runs in the Operations repo.
+-- The live scoring daemon (scripts/score_heat_live.py) INSERTs only.
