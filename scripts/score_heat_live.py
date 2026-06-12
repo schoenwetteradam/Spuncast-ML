@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """Near-real-time scoring daemon for early re-melt decisions.
 
-Polls the ``v_ml_heat_early_score_v1`` view for heats that have not yet been
-scored, runs inference with the ``early_remelt_decision`` feature set, and
-writes results to the ``ml_heat_scores`` table in the operations database.
-
-Heats at or above ``SCORE_REMELT_THRESHOLD`` are treated as positive scrap-risk
-flags for ``ml_heat_scores``.  Rows can optionally be mirrored into
-``heat_recommendations`` with Grafana-friendly ``decision_code`` values
-(``HOLD`` / ``CAUTION`` / ``ADVISORY``) using ``SCORE_HOLD_THRESHOLD`` and
-``SCORE_CAUTION_THRESHOLD``.  Set ``SCORE_WRITE_ADVISORY_ROWS=1`` to also insert
-lower-probability advisory rows down to ``SCORE_ADVISORY_THRESHOLD``.
+Polls ``v_ml_heat_early_score_v1`` for heats that have no entry in
+``v_latest_ml_heat_score`` or were scored by an older model version, runs
+inference with the ``early_remelt_decision`` feature set, and INSERTs one row
+per scoring pass into ``ml_heat_scores`` (DDL owned by Operations;
+``db/init/122_ml_heat_scores_contract.sql``).  Rows are never updated; the
+``v_latest_ml_heat_score`` view returns the most-recent row per heat.
 
 Optional SHAP summaries (``SCORE_ENABLE_SHAP=1``) are written to
-``ml_heat_scores.explanation_json`` when that column exists (see
-``sql/073_ml_heat_scores_explanation.sql``).
+``ml_heat_scores.metadata`` as ``{"shap": {"top_features": {...}}}``.
 
 Usage
 -----
@@ -22,7 +17,7 @@ Run as a long-lived background process::
 
     python scripts/score_heat_live.py
 
-Read-only smoke test (no writes to ``ml_heat_scores`` or ``heat_recommendations``)::
+Read-only smoke test (no writes to ``ml_heat_scores``)::
 
     python scripts/score_heat_live.py --dry-run --once --test-heats 100
 
@@ -34,14 +29,11 @@ Environment variables (all optional, with defaults):
                                 (default 0.65)
     SCORE_HOLD_THRESHOLD      – decision_code HOLD when prob >= this (default 0.80)
     SCORE_CAUTION_THRESHOLD   – CAUTION band floor (default 0.65)
-    SCORE_ADVISORY_THRESHOLD  – minimum prob for advisory inserts when
-                                SCORE_WRITE_ADVISORY_ROWS=1 (default 0.50)
-    SCORE_WRITE_ADVISORY_ROWS – set to 1 to insert CAUTION/ADVISORY rows below
-                                the remelt threshold down to advisory threshold
     SCORE_ENABLE_SHAP         – set to 1/true to compute SHAP summaries
     SCORE_SHAP_MAX_HEATS      – max rows per cycle to explain (default 10)
     TEAMS_WEBHOOK_URL         – Microsoft Teams incoming webhook URL; when set,
-                                posts a card for every heat scored
+                                posts a card for every heat scored above
+                                TEAMS_MIN_PROBABILITY
     TEAMS_MIN_PROBABILITY     – only notify when P(scrap) >= this (default 0.0,
                                 i.e. notify for every scored heat)
 """
@@ -80,8 +72,6 @@ SCORE_HORIZON_HOURS: int = int(os.environ.get("SCORE_HORIZON_HOURS", "8"))
 REMELT_THRESHOLD: float = float(os.environ.get("SCORE_REMELT_THRESHOLD", "0.65"))
 HOLD_THRESHOLD: float = float(os.environ.get("SCORE_HOLD_THRESHOLD", "0.80"))
 CAUTION_THRESHOLD: float = float(os.environ.get("SCORE_CAUTION_THRESHOLD", "0.65"))
-ADVISORY_THRESHOLD: float = float(os.environ.get("SCORE_ADVISORY_THRESHOLD", "0.50"))
-WRITE_ADVISORY_ROWS: bool = os.environ.get("SCORE_WRITE_ADVISORY_ROWS", "").strip().lower() in {"1", "true", "yes"}
 FEATURE_SET: str = "early_remelt_decision"
 ENABLE_SHAP: bool = os.environ.get("SCORE_ENABLE_SHAP", "").strip().lower() in {"1", "true", "yes"}
 SHAP_MAX_HEATS: int = int(os.environ.get("SCORE_SHAP_MAX_HEATS", "10"))
@@ -285,15 +275,19 @@ def _safe_float(value: float | int | None) -> float | None:
     return numeric if math.isfinite(numeric) else None
 
 
-def get_unscored_heats(conn: Any, limit: int | None = None) -> pd.DataFrame:
-    """Return rows from the early-score view that have no entry in ``ml_heat_scores``."""
+def get_unscored_heats(conn: Any, model_version: str, limit: int | None = None) -> pd.DataFrame:
+    """Return rows from the early-score view pending a fresh score.
+
+    A heat is pending when it has no row in v_latest_ml_heat_score, or its
+    latest score was produced by a different model version.
+    """
     sql = (
         "SELECT v.* "
         "FROM v_ml_heat_early_score_v1 v "
-        "LEFT JOIN ml_heat_scores s ON s.heat_number = v.heat_number "
-        "WHERE s.heat_number IS NULL "
-        "  AND v.pour_date >= NOW() - INTERVAL '%s hours'"
-    ) % SCORE_HORIZON_HOURS
+        "LEFT JOIN v_latest_ml_heat_score s ON s.heat_number = v.heat_number "
+        "WHERE (s.heat_number IS NULL OR s.model_version != %s) "
+        f"  AND v.pour_date >= NOW() - INTERVAL '{SCORE_HORIZON_HOURS} hours'"
+    )
     if limit is not None:
         if limit < 1:
             raise ValueError("limit must be >= 1 when provided")
@@ -304,7 +298,7 @@ def get_unscored_heats(conn: Any, limit: int | None = None) -> pd.DataFrame:
             message="pandas only supports SQLAlchemy connectable.*",
             category=UserWarning,
         )
-        return pd.read_sql_query(sql, conn)
+        return pd.read_sql_query(sql, conn, params=(model_version,))
 
 
 def _top_contributing_feature(row: pd.Series, feature_columns: list[str]) -> str | None:
@@ -359,10 +353,6 @@ def _shap_top_features(explainer: Any, row_frame: pd.DataFrame, top_k: int = 5) 
         return None
 
 
-def _recommendation_insert_min_probability() -> float:
-    return ADVISORY_THRESHOLD if WRITE_ADVISORY_ROWS else REMELT_THRESHOLD
-
-
 def decision_code_for_probability(probability: float) -> str:
     """Map scrap probability to operator-facing decision tiers (see configuration guide)."""
     if probability >= HOLD_THRESHOLD:
@@ -370,63 +360,6 @@ def decision_code_for_probability(probability: float) -> str:
     if probability >= CAUTION_THRESHOLD:
         return "CAUTION"
     return "ADVISORY"
-
-
-def _format_shap_note(payload: dict[str, float] | None) -> str | None:
-    if not payload:
-        return None
-    bits = [f"{name} ({value:+.3f})" for name, value in list(payload.items())[:3]]
-    return "SHAP drivers: " + ", ".join(bits)
-
-
-def upsert_heat_recommendation(
-    cursor: Any,
-    heat_number: str,
-    probability: float,
-    decision_code: str,
-    primary_driver: str | None,
-    extra_note: str | None = None,
-) -> None:
-    """Upsert a Grafana-facing recommendation row for the current heat."""
-    templates = {
-        "HOLD": "Re-melt candidate \u2014 high scrap probability before blast",
-        "CAUTION": "Elevated scrap probability \u2014 increase monitoring before blast",
-        "ADVISORY": "Advisory scrap signal \u2014 review process indicators before next operations",
-    }
-    text = templates.get(decision_code, templates["ADVISORY"])
-    if extra_note:
-        text = f"{text} \u2014 {extra_note}"[:4000]
-    cursor.execute(
-        "INSERT INTO heat_recommendations "
-        "(heat_number, decision_code, recommendation_text, primary_driver, scrap_probability, feature_set, created_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, NOW()) "
-        "ON CONFLICT (heat_number) DO UPDATE "
-        "SET scrap_probability = EXCLUDED.scrap_probability, "
-        "    primary_driver = EXCLUDED.primary_driver, "
-        "    recommendation_text = EXCLUDED.recommendation_text, "
-        "    decision_code = EXCLUDED.decision_code, "
-        "    created_at = NOW()",
-        (
-            heat_number,
-            decision_code,
-            text,
-            primary_driver,
-            probability,
-            FEATURE_SET,
-        ),
-    )
-
-
-def _ml_scores_has_explanation_column(conn: Any) -> bool:
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT 1 FROM information_schema.columns "
-            "WHERE table_schema = ANY (current_schemas(false)) "
-            "  AND table_name = 'ml_heat_scores' "
-            "  AND column_name = 'explanation_json' "
-            "LIMIT 1"
-        )
-        return cur.fetchone() is not None
 
 
 def write_scores(
@@ -440,11 +373,7 @@ def write_scores(
     shap_index_allowlist: set[Any],
     dry_run: bool = False,
 ) -> None:
-    """Persist scores to ``ml_heat_scores`` and optionally ``heat_recommendations``."""
-    include_json = _ml_scores_has_explanation_column(conn)
-    if ENABLE_SHAP and not include_json:
-        logger.warning("SCORE_ENABLE_SHAP is set but explanation_json column is missing; apply sql/073_ml_heat_scores_explanation.sql")
-
+    """Insert one score row per heat into ``ml_heat_scores``."""
     with conn.cursor() as cur:
         for idx, row in scored.iterrows():
             probability = _safe_float(row["scrap_probability"])
@@ -452,66 +381,32 @@ def write_scores(
                 continue
 
             shap_payload: dict[str, Any] | None = None
-            if include_json and explainer is not None and idx in shap_index_allowlist:
+            if explainer is not None and idx in shap_index_allowlist:
                 top_map = _shap_top_features(explainer, x_features.loc[[idx]])
                 if top_map:
-                    shap_payload = {
-                        "top_features": top_map,
-                        "model_version": model_version,
-                    }
+                    shap_payload = {"top_features": top_map}
 
-            if include_json:
-                cur.execute(
-                    "INSERT INTO ml_heat_scores "
-                    "(heat_number, scrap_probability, predicted_flag, "
-                    " recommended_action, feature_set, model_version, scored_at, explanation_json) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, NOW(), %s) "
-                    "ON CONFLICT (heat_number) DO UPDATE "
-                    "SET scrap_probability = EXCLUDED.scrap_probability, "
-                    "    predicted_flag = EXCLUDED.predicted_flag, "
-                    "    recommended_action = EXCLUDED.recommended_action, "
-                    "    model_version = EXCLUDED.model_version, "
-                    "    scored_at = NOW(), "
-                    "    explanation_json = COALESCE(EXCLUDED.explanation_json, ml_heat_scores.explanation_json)",
-                    (
-                        row["heat_number"],
-                        probability,
-                        int(row["predicted_scrap_flag"]),
-                        row["recommended_action"],
-                        FEATURE_SET,
-                        model_version,
-                        Json(shap_payload) if shap_payload is not None else None,
-                    ),
-                )
-            else:
-                cur.execute(
-                    "INSERT INTO ml_heat_scores "
-                    "(heat_number, scrap_probability, predicted_flag, "
-                    " recommended_action, feature_set, model_version, scored_at) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, NOW()) "
-                    "ON CONFLICT (heat_number) DO UPDATE "
-                    "SET scrap_probability = EXCLUDED.scrap_probability, "
-                    "    predicted_flag = EXCLUDED.predicted_flag, "
-                    "    recommended_action = EXCLUDED.recommended_action, "
-                    "    model_version = EXCLUDED.model_version, "
-                    "    scored_at = NOW()",
-                    (
-                        row["heat_number"],
-                        probability,
-                        int(row["predicted_scrap_flag"]),
-                        row["recommended_action"],
-                        FEATURE_SET,
-                        model_version,
-                    ),
-                )
-            insert_min = _recommendation_insert_min_probability()
+            metadata: dict[str, Any] | None = {"shap": shap_payload} if shap_payload else None
+
+            cur.execute(
+                "INSERT INTO ml_heat_scores "
+                "(heat_number, model_version, scrap_probability, predicted_flag, "
+                " recommended_action, feature_set, metadata) "
+                "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)",
+                (
+                    row["heat_number"],
+                    model_version,
+                    probability,
+                    int(row["predicted_scrap_flag"]),
+                    row["recommended_action"],
+                    Json({"name": FEATURE_SET}),
+                    Json(metadata) if metadata is not None else None,
+                ),
+            )
             raw_row = raw_frame.loc[idx] if idx in raw_frame.index else row
             driver = _top_contributing_feature(raw_row, feature_columns)
             tier = decision_code_for_probability(probability)
             tops = shap_payload.get("top_features") if isinstance(shap_payload, dict) else None
-            if probability >= insert_min:
-                note = _format_shap_note(tops) if isinstance(tops, dict) else None
-                upsert_heat_recommendation(cur, row["heat_number"], probability, tier, driver, note)
             send_teams_notification(
                 row["heat_number"], probability, tier, driver,
                 top_features=tops,
@@ -527,11 +422,12 @@ def scoring_loop(*, dry_run: bool = False, limit: int | None = None) -> int:
     model_version = model_path.stem
 
     with get_conn() as conn:
-        df = get_unscored_heats(conn, limit=limit)
+        df = get_unscored_heats(conn, model_version, limit=limit)
         if df.empty:
             logger.info(
-                "No unscored heats in the early-score view (horizon=%dh, limit=%s); nothing to score this cycle.",
+                "No pending heats in the early-score view (horizon=%dh, model=%s, limit=%s); nothing to score this cycle.",
                 SCORE_HORIZON_HOURS,
+                model_version,
                 limit,
             )
             return 0
@@ -586,7 +482,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Score in memory and log a sample; do not write to ml_heat_scores or heat_recommendations.",
+        help="Score in memory and log a sample; do not write to ml_heat_scores.",
     )
     parser.add_argument(
         "--once",
@@ -622,14 +518,12 @@ def main(argv: list[str] | None = None) -> None:
         )
     logger.info(
         "Starting live scoring daemon  poll=%ds  horizon=%dh  remelt=%.2f hold=%.2f caution=%.2f "
-        "advisory_min=%.2f advisory_rows=%s shap=%s  dry_run=%s  once=%s  limit=%s",
+        "shap=%s  dry_run=%s  once=%s  limit=%s",
         POLL_INTERVAL_SEC,
         SCORE_HORIZON_HOURS,
         REMELT_THRESHOLD,
         HOLD_THRESHOLD,
         CAUTION_THRESHOLD,
-        ADVISORY_THRESHOLD,
-        WRITE_ADVISORY_ROWS,
         ENABLE_SHAP,
         args.dry_run,
         args.once,
